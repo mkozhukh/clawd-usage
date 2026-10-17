@@ -10,6 +10,7 @@ private let levelOk = color(RGBA("#FF4ADE80")), levelWarn = color(RGBA("#FFFBBF2
 private let levelCrit = color(RGBA("#FFF87171")), levelDead = color(RGBA("#FF6B7280"))
 private let lineColor = color(RGBA("#FF8B8B94")), resetColor = color(RGBA("#FFD4D4D8"))
 private let barWeek = color(RGBA("#FF60A5FA")), barModel = color(RGBA("#FFA78BFA"))
+private let barCodex = color(RGBA("#FF2DD4BF"))
 private let heartOff = color(RGBA("#FF3F3F46"))
 
 struct WidgetView: View {
@@ -18,6 +19,7 @@ struct WidgetView: View {
     // @State, not @StateObject: owned here but not observed, so their per-frame scenes
     // redraw only MascotView and SkyView, not the whole widget.
     @State private var mascot = MascotEngine()
+    @State private var astra = AstraEngine()
     @State private var sky = SkyEngine()
     @State private var listHeight = 0.0
     /// Taller session lists scroll.
@@ -26,10 +28,10 @@ struct WidgetView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text("CLAUDE USAGE").font(.system(size: 12, weight: .semibold, design: .monospaced)).tracking(0.4).foregroundStyle(muted)
+                Text(model.primary == .codex ? "CODEX USAGE" : "CLAUDE USAGE").font(.system(size: 12, weight: .semibold, design: .monospaced)).tracking(0.4).foregroundStyle(muted)
                 if model.demo { Text("DEMO").font(.system(size: 8, weight: .bold)).foregroundStyle(accent) }
                 Spacer()
-                hearts
+                if model.primary != nil { hearts }
                 Button(action: hide) { Image(systemName: "xmark").foregroundStyle(muted).frame(width: 20, height: 20).contentShape(Rectangle()) }.help("Hide widget · reopen from the menu bar")
             }
             .buttonStyle(.plain)
@@ -43,13 +45,16 @@ struct WidgetView: View {
                         ZStack(alignment: .bottomLeading) {
                             if model.showSky { SkyView(engine: sky) }
                             HStack(alignment: .bottom, spacing: 0) {
-                                HStack(alignment: .bottom, spacing: 2) {
-                                    Text(model.usage.map { "\($0.session.percent)" } ?? "--")
-                                        .font(.system(size: 30, weight: .light)).monospacedDigit()
-                                        .foregroundStyle(levelColor(model.usage?.session.percent))
-                                    Text("%").font(.system(size: 14)).foregroundStyle(lineColor).padding(.bottom, 7)
-                                }.fixedSize().padding(.bottom, 3)
-                                MascotView(model: model, engine: mascot, sky: sky).padding(.leading, 10)
+                                if model.primary != nil {
+                                    HStack(alignment: .bottom, spacing: 2) {
+                                        Text(model.mainLimit.map { "\($0.percent)" } ?? "--")
+                                            .font(.system(size: 30, weight: .light)).monospacedDigit()
+                                            .foregroundStyle(levelColor(model.mainLimit?.percent))
+                                        Text("%").font(.system(size: 14)).foregroundStyle(lineColor).padding(.bottom, 7)
+                                    }.fixedSize().padding(.bottom, 3).padding(.trailing, 10)
+                                }
+                                // Always present: it also drives the sky. It draws Clawd only while Claude is shown.
+                                MascotView(model: model, engine: mascot, astra: astra, sky: sky)
                             }
                         }
                         .frame(height: mascotAreaHeight)
@@ -59,53 +64,33 @@ struct WidgetView: View {
                                 .onChange(of: geometry.size.width) { _, width in model.skyWidth = width }
                         })
                         .help(model.skyTip)
-                        bar(model.usage?.session.percent, color: levelColor(model.usage?.session.percent), height: 6).padding(.top, 1)
-                        Text(sessionResetText).font(.system(size: 11)).foregroundStyle(resetColor).padding(.top, 7)
-                        if let week = model.usage?.week { limitRow("WEEK", week, color: barWeek).padding(.top, 9) }
-                        ForEach((model.usage?.extraWeeks ?? [:]).keys.sorted(), id: \.self) { key in
-                            if let value = model.usage?.extraWeeks[key] { limitRow("\(key.uppercased()) · WEEK", value, color: barModel).padding(.top, 7) }
+                        if model.primary != nil {
+                            bar(model.mainLimit?.percent, color: levelColor(model.mainLimit?.percent), height: 6).padding(.top, 1)
+                            Text(mainResetText).font(.system(size: 11)).foregroundStyle(resetColor).padding(.top, 7)
                         }
-                    }
-                    HStack {
-                        HStack(spacing: 5) {
-                            if model.refreshing { ProgressView().controlSize(.mini) }
-                            else { Circle().fill(model.stale ? .orange : .green).frame(width: 5, height: 5) }
-                            Text(model.stale ? "STALE" : "LIVE").font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(muted)
-                        }
-                        Spacer()
-                        HStack(spacing: 5) {
-                            Text("\(model.sessions.count) \(model.sessions.count == 1 ? "session" : "sessions")")
-                            Text("·")
-                            Text("\(model.busyCount) working")
-                            if model.waitingCount > 0 {
-                                Text("·")
-                                Text("\(model.waitingCount) waiting").foregroundStyle(.yellow)
+                        if model.showClaude {
+                            if let week = model.usage?.week { limitRow("WEEK", week, color: barWeek).padding(.top, 9) }
+                            ForEach((model.usage?.extraWeeks ?? [:]).keys.sorted(), id: \.self) { key in
+                                if let value = model.usage?.extraWeeks[key] { limitRow("\(key.uppercased()) · WEEK", value, color: barModel).padding(.top, 7) }
                             }
-                            Image(systemName: model.expanded ? "chevron.down" : "chevron.right")
-                                .font(.system(size: 8, weight: .semibold)).frame(width: 10)
                         }
-                        .foregroundStyle(muted)
+                        // Codex limits under their own windows; the first one is the big number when Codex leads.
+                        if model.showCodex {
+                            ForEach(Array(codexRows.enumerated()), id: \.offset) { index, entry in
+                                limitRow("CODEX · \(entry.title)", entry.limit, color: barCodex).padding(.top, index == 0 ? 11 : 7)
+                            }
+                        }
                     }
-                    .font(.system(size: 11))
-                    .contentShape(Rectangle())
-                    .onTapGesture { model.expanded.toggle() }
-                    .help(model.expanded ? "Hide sessions" : "Show sessions")
+                    if model.primary != nil { statusLine }
 
-                    if let error = model.error { errorView(error) }
-                    if let error = model.storageError { errorView(error) }
+                    if model.showClaude, let error = model.error { errorView(error) }
+                    if model.showClaude, let error = model.storageError { errorView(error) }
+                    if model.showCodex, let error = model.codexError { errorView(error) }
 
                     if model.expanded { sessionList }
                 }.padding(.horizontal, 18).padding(.bottom, 18)
 
-            HStack {
-                Text(model.usage.map { "Updated \($0.fetchedAt.formatted(date: .omitted, time: .shortened))" } ?? "Waiting for first usage report")
-                Spacer()
-                Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.plain).disabled(model.refreshing || model.demo).help("Refresh usage")
-            }.foregroundStyle(muted)
-            .font(.system(size: 10))
-            .padding(.horizontal, 18).padding(.vertical, 13)
-            .background(.black.opacity(0.15))
+            if model.primary != nil { footer }
         }
         .foregroundStyle(Color(red: 0.91, green: 0.91, blue: 0.89))
         .background(Color(red: 0.09, green: 0.105, blue: 0.12))
@@ -123,46 +108,104 @@ struct WidgetView: View {
         .preferredColorScheme(.dark)
     }
 
+    private var codexRows: [CodexLimit] {
+        let limits = model.codex?.limits ?? []
+        return model.primary == .codex ? Array(limits.dropFirst()) : limits
+    }
+
+    /// LIVE/STALE and the session counts; a click opens the list.
+    private var statusLine: some View {
+        HStack {
+            HStack(spacing: 5) {
+                if model.refreshing && model.primary == .claude { ProgressView().controlSize(.mini) }
+                else { Circle().fill(model.stale ? .orange : .green).frame(width: 5, height: 5) }
+                Text(model.stale ? "STALE" : "LIVE").font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(muted)
+            }
+            Spacer()
+            // Sessions of every shown harness, counted together.
+            let count = claudeSessions.count + codexSessions.count
+            let working = claudeSessions.filter { $0.status == "busy" }.count + codexSessions.filter { $0.status == "busy" }.count
+            let waiting = claudeSessions.filter { $0.status == "waiting" }.count
+            HStack(spacing: 5) {
+                Text("\(count) \(count == 1 ? "session" : "sessions")")
+                Text("·")
+                Text("\(working) working")
+                if waiting > 0 {
+                    Text("·")
+                    Text("\(waiting) waiting").foregroundStyle(.yellow)
+                }
+                Image(systemName: model.expanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 8, weight: .semibold)).frame(width: 10)
+            }
+            .foregroundStyle(muted)
+            .contentShape(Rectangle())
+            .onTapGesture { model.expanded.toggle() }
+            .help(model.expanded ? "Hide sessions" : "Show sessions")
+        }
+        .font(.system(size: 11))
+    }
+
+    private var footer: some View {
+        HStack {
+            Text(model.mainFetchedAt.map { "Updated \($0.formatted(date: .omitted, time: .shortened))" } ?? "Waiting for first usage report")
+            Spacer()
+            Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.plain).disabled(model.refreshing || model.demo).help("Refresh usage")
+        }.foregroundStyle(muted)
+        .font(.system(size: 10))
+        .padding(.horizontal, 18).padding(.vertical, 13)
+        .background(.black.opacity(0.15))
+    }
 
     private var hearts: some View {
         HStack(spacing: 3) {
             ForEach(0..<3) { index in
-                let remaining = Mood.heartHalves(percent: model.usage?.session.percent ?? 100) - index * 2
+                let remaining = Mood.heartHalves(percent: model.mainLimit?.percent ?? 100) - index * 2
                 // A lost heart stays in dark grey; a half one is lit on its left half only.
                 Image(systemName: "heart.fill").foregroundStyle(heartOff)
                     .overlay(alignment: .leading) {
-                        Image(systemName: "heart.fill").foregroundStyle(model.usage == nil ? muted : accent)
+                        Image(systemName: "heart.fill").foregroundStyle(model.mainLimit == nil ? muted : model.primary == .codex ? barCodex : accent)
                             .mask(alignment: .leading) {
                                 GeometryReader { Rectangle().frame(width: $0.size.width * Double(min(2, max(0, remaining))) / 2) }
                             }
                     }
                     .font(.system(size: 10))
             }
-        }.padding(.trailing, 8).accessibilityLabel("\(Mood.heartHalves(percent: model.usage?.session.percent ?? 100)) of 6 health halves")
+        }.padding(.trailing, 8).accessibilityLabel("\(Mood.heartHalves(percent: model.mainLimit?.percent ?? 100)) of 6 health halves")
     }
 
-    /// Opened from the sessions line: every live session, scrolling past listMax.
+    private var claudeSessions: [Session] { model.showClaude ? model.sessions : [] }
+    private var codexSessions: [Session] { model.showCodex ? model.codexActivity.sessions : [] }
+
+    /// Opened from the sessions line: every live session, scrolling past listMax. With both
+    /// harnesses shown, each has its own heading; rows take the harness's colour.
     private var sessionList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if model.sessions.isEmpty { Text("No Claude Code sessions running.").font(.system(size: 11)).foregroundStyle(muted) }
-                ForEach(model.sessions) { session in
-                    HStack(alignment: .top) {
-                        Image(systemName: session.status == "busy" ? "play.fill" : session.status == "waiting" ? "questionmark.circle" : "circle")
-                            .foregroundStyle(session.status == "waiting" ? .yellow : accent)
-                            .frame(width: 14)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(session.displayName).lineLimit(1)
-                            Text(session.waitingFor ?? session.cwd).font(.system(size: 9)).foregroundStyle(muted).lineLimit(2)
-                        }
-                        Spacer(minLength: 0)
-                    }.font(.system(size: 11)).help(session.cwd)
-                }
+                if model.showClaude { sessionGroup("CLAUDE", claudeSessions, empty: "No Claude Code sessions running.", tint: accent) }
+                if model.showCodex { sessionGroup("CODEX", codexSessions, empty: "No Codex sessions running.", tint: barCodex) }
             }
             .onGeometryChange(for: Double.self) { $0.size.height } action: { listHeight = $0 }
         }
         .frame(height: min(listHeight, listMax))
         .scrollIndicators(listHeight > listMax ? .automatic : .never)
+    }
+
+    @ViewBuilder private func sessionGroup(_ title: String, _ sessions: [Session], empty: String, tint: Color) -> some View {
+        if model.showClaude && model.showCodex { label(title).padding(.top, title == "CLAUDE" ? 0 : 4) }
+        if sessions.isEmpty { Text(empty).font(.system(size: 11)).foregroundStyle(muted) }
+        ForEach(sessions) { session in
+            HStack(alignment: .top) {
+                Image(systemName: session.status == "busy" ? "play.fill" : session.status == "waiting" ? "questionmark.circle" : "circle")
+                    .foregroundStyle(session.status == "waiting" ? .yellow : tint)
+                    .frame(width: 14)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.displayName).lineLimit(1)
+                    Text(session.waitingFor ?? session.cwd).font(.system(size: 9)).foregroundStyle(muted).lineLimit(2)
+                }
+                Spacer(minLength: 0)
+            }.font(.system(size: 11)).help(session.cwd)
+        }
     }
 
     private func label(_ text: String) -> some View {
@@ -194,12 +237,13 @@ struct WidgetView: View {
             bar(value.percent, color: color, height: 4)
         }
     }
-    private var sessionResetText: String {
-        guard let session = model.usage?.session else {
-            return model.error == nil ? "loading..." : "no data"
-        }
-        guard let resetsAt = session.resetsAt else { return "" }
-        return spanText(until: resetsAt, now: model.now).map { "resets in \($0)" } ?? "window closed"
+    /// Under the big number. Codex names its window, since it may be the five-hour or the weekly one.
+    private var mainResetText: String {
+        let failed = model.primary == .claude ? model.error != nil : model.codexError != nil
+        guard let limit = model.mainLimit else { return failed ? "no data" : "loading..." }
+        let window = model.primary == .codex ? model.codex?.limits.first.map { "\($0.title.lowercased()) · " } ?? "" : ""
+        guard let resetsAt = limit.resetsAt else { return window.isEmpty ? "" : String(window.dropLast(3)) }
+        return window + (spanText(until: resetsAt, now: model.now).map { "resets in \($0)" } ?? "window closed")
     }
     private func errorView(_ message: String) -> some View {
         Text(message).font(.system(size: 10)).foregroundStyle(.orange).textSelection(.enabled)
@@ -231,18 +275,19 @@ struct PreferencesView: View {
                 })).disabled(model.demo)
                 if let loginError { Text(loginError).font(.caption).foregroundStyle(.orange) }
             }
-            Section("Claude Code") {
-                LabeledContent("Executable") {
-                    HStack {
-                        TextField("Executable", text: $model.cliPath, prompt: Text("Detect automatically")).labelsHidden()
-                        Button("Choose…") {
-                            let picker = NSOpenPanel()
-                            picker.canChooseDirectories = false
-                            picker.showsHiddenFiles = true
-                            if picker.runModal() == .OK, let url = picker.url { model.cliPath = url.path }
-                        }
-                    }
-                }
+            Section("Claude") {
+                executableField("claude", path: $model.cliPath, found: model.claudeExecutable,
+                                missing: "Claude Code was not found. Install it or choose its executable; until then Claude stays off.")
+                Toggle("Show in widget", isOn: available($model.claudeEnabled, model.claudeExecutable)).disabled(model.claudeExecutable == nil)
+                Toggle("Show in menu bar", isOn: available($model.claudeMenuBar, model.claudeExecutable)).disabled(model.claudeExecutable == nil)
+            }
+            Section("Codex") {
+                executableField("codex", path: $model.codexPath, found: model.codexExecutable,
+                                missing: "Codex was not found. Install it or choose its executable; until then Codex stays off.")
+                Toggle("Show in widget", isOn: available($model.codexEnabled, model.codexExecutable)).disabled(model.codexExecutable == nil)
+                Toggle("Show in menu bar", isOn: available($model.codexMenuBar, model.codexExecutable)).disabled(model.codexExecutable == nil)
+                Text("Limits are read from codex app-server with your Codex login; no model is run. Activity comes from the session logs in ~/.codex.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("About") {
                 Text("Clawd for Mac · 0.1.0")
@@ -256,7 +301,33 @@ struct PreferencesView: View {
         .formStyle(.grouped)
         // Tall enough for everything without scrolling; city matches or open
         // coordinates scroll. A grouped Form has no natural height to size by.
-        .frame(width: 460, height: 645)
+        .frame(width: 460, height: 820)
+    }
+
+    /// A path field with a file picker; empty means detect automatically. Below it, where the
+    /// executable was found, or why the harness is off.
+    private func executableField(_ name: String, path: Binding<String>, found: URL?, missing: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            LabeledContent("Executable") {
+                HStack {
+                    TextField(name, text: path, prompt: Text("Detect automatically")).labelsHidden()
+                    Button("Choose…") {
+                        let picker = NSOpenPanel()
+                        picker.canChooseDirectories = false
+                        picker.showsHiddenFiles = true
+                        if picker.runModal() == .OK, let url = picker.url { path.wrappedValue = url.path }
+                    }
+                }
+            }
+            if let found { Text("Found at \(found.path)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            else { Text(missing).font(.caption).foregroundStyle(.orange) }
+        }
+    }
+
+    /// Without its executable a harness counts as off: the toggle shows off and cannot be changed,
+    /// while the saved choice comes back once the executable is found.
+    private func available(_ setting: Binding<Bool>, _ executable: URL?) -> Binding<Bool> {
+        Binding(get: { executable != nil && setting.wrappedValue }, set: { if executable != nil { setting.wrappedValue = $0 } })
     }
 }
 

@@ -147,6 +147,34 @@ final class MascotEngine: ObservableObject {
         return bubble
     }
 
+    /// Reduce Motion: a still pose that still tells the mood and health, where he stands now.
+    /// Pending animations are dropped, so turning motion back on does not replay them.
+    func still() {
+        act = nil; confT = -1; loveT = -1; noteT = -1
+        entered = true
+        let span = max(0, areaWidth - mascotW)
+        if x < 0 { x = span / 2 }
+        x = min(x, span)
+        let mood = forced ?? self.mood
+        buried = mood == .sleep   // already in the burrow, so motion resumes without digging in again
+        var f = ClawdFrame()
+        var s = MascotScene()
+        switch mood {
+        case .sleep: f.dig = ClawdSprite.burrowDig; f.eyes = "closed"
+        case .dead: f.flip = true; f.eyes = "x"
+        case .wait: f.eyes = "wide"; s.bubble = ("?", RGBA("#FFFBBF24"), x + mascotW / 2 - 6, 22)
+        case .work: f.eyes = "focus"
+        case .idle: break
+        }
+        let halves: Int? = forced == .dead ? 0 : percent.map { Mood.heartHalves(percent: $0) }
+        let tier = HealthTier.tier(halves: halves ?? 5)
+        if !tier.eyes.isEmpty && (f.eyes == "open" || f.eyes == "focus") { f.eyes = tier.eyes }
+        s.geometry = ClawdSprite.geometry(f)
+        s.x = x.rounded()
+        if forced != nil { s.tag = "dev · " + mood.rawValue }
+        scene = s
+    }
+
     func step() {
         tick += 1
         if !entered {   // entrance on widget start, once the mood is known
@@ -325,6 +353,7 @@ final class MascotEngine: ObservableObject {
 struct MascotView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var engine: MascotEngine
+    @ObservedObject var astra: AstraEngine
     @ObservedObject var sky: SkyEngine
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -334,6 +363,9 @@ struct MascotView: View {
     var body: some View {
         GeometryReader { geometry in
             Canvas { context, size in
+                // Astra floats behind; Clawd belongs to Claude, and with Claude off the ground stays empty.
+                drawAstra(context, astra.scene, size: size)
+                guard model.showClaude else { return }
                 let s = engine.scene
                 let h = size.height
                 let top = h + mascotSink - s.lift - mascotH
@@ -368,37 +400,61 @@ struct MascotView: View {
                     context.draw(Text(s.tag).font(.system(size: 8)).foregroundColor(color(RGBA("#FF6B7280"))), at: .zero, anchor: .topLeading)
                 }
             }
-            .onAppear { engine.areaWidth = geometry.size.width }
-            .onChange(of: geometry.size.width) { _, width in engine.areaWidth = width }
+            .onAppear { engine.areaWidth = geometry.size.width; astra.areaWidth = geometry.size.width }
+            .onChange(of: geometry.size.width) { _, width in engine.areaWidth = width; astra.areaWidth = width }
+            .contentShape(Rectangle())
+            .onTapGesture { point in
+                if astra.contains(point, height: geometry.size.height) { astra.click() }
+                else if model.showClaude { engine.click() }
+            }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { engine.click() }
         .onContinuousHover { phase in
             switch phase {
             case .active(let point):
                 let cx = engine.scene.x + mascotW / 2
-                engine.mouseLook = point.x > cx + 10 ? 1 : point.x < cx - 10 ? -1 : 0
-            case .ended: engine.mouseLook = nil
+                engine.mouseLook = model.showClaude ? (point.x > cx + 10 ? 1 : point.x < cx - 10 ? -1 : 0) : nil
+                let ax = astra.scene.x + astraW / 2
+                astra.mouseLook = point.x > ax + 10 ? 1 : point.x < ax - 10 ? -1 : 0
+            case .ended: engine.mouseLook = nil; astra.mouseLook = nil
             }
         }
-        .accessibilityLabel("Clawd is \(model.mood.rawValue)")
-        .help("Click Clawd to say hello. Right-click to preview a mood, the sky or the weather.")
+        .accessibilityLabel(accessibility)
+        .help(model.showClaude || model.showCodex ? "Click a mascot to say hello. Right-click to preview moods, the sky or the weather."
+              : "Right-click to preview the sky or the weather.")
         .task(id: reduceMotion) { await run() }
     }
 
+    private var accessibility: String {
+        let parts = (model.showClaude ? ["Clawd is \(model.mood.rawValue)"] : []) + (model.showCodex ? ["Astra is shown"] : [])
+        return parts.isEmpty ? "Sky" : parts.joined(separator: ", ")
+    }
+
     /// Mascot timer: 90 ms, 60 ms during Claude Code animations; paused while hidden.
+    /// It also drives Astra and the sky, so it keeps running with Clawd off.
     /// With Reduce Motion Clawd stands still and the sky is redrawn once a second, without motion.
     private func run() async {
         while !Task.isCancelled {
             guard model.visible else { try? await Task.sleep(for: .milliseconds(250)); continue }
-            if !reduceMotion {
+            if model.showClaude {
                 engine.mood = model.mood
                 engine.forced = model.forcedMood
                 engine.percent = model.usage?.session.percent
                 engine.hovering = model.hovering
                 engine.notice(finished: model.sessionFinished, celebration: model.celebration)
-                engine.step()
+                if reduceMotion { engine.still() } else { engine.step() }
             }
+            astra.shown = model.showCodex
+            astra.peak = model.codex?.peak
+            astra.busy = model.codexActivity.busy > 0
+            astra.lastActive = model.codexActivity.lastActive
+            astra.hovering = model.hovering
+            astra.forced = model.forcedCodexMood
+            astra.clawdCenter = model.showClaude ? engine.scene.x + mascotW / 2 : nil
+            astra.notice(finished: model.codexFinished, reset: model.codexReset, celebration: model.celebration)
+            if let name = model.codexDevAct { model.codexDevAct = nil; astra.start(name) }
+            astra.step(animate: !reduceMotion)
+            // Astra greeted Clawd: he waves back.
+            if astra.takeWave() && model.showClaude && !reduceMotion { engine.start("wave") }
             if model.showSky {
                 sky.forcePhase = model.forcedPhase
                 sky.forceWeather = model.forcedWeather
@@ -419,12 +475,21 @@ enum DevMenu {
     static func menu(_ model: AppModel) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        menu.addItem(ActionItem("Auto", on: model.forcedMood == nil && model.forcedPhase == nil && model.forcedWeather == nil) {
-            model.forcedMood = nil; model.forcedPhase = nil; model.forcedWeather = nil
+        menu.addItem(ActionItem("Auto", on: model.forcedMood == nil && model.forcedCodexMood == nil && model.forcedPhase == nil && model.forcedWeather == nil) {
+            model.forcedMood = nil; model.forcedCodexMood = nil; model.forcedPhase = nil; model.forcedWeather = nil
         })
         menu.addItem(.separator())
-        menu.addItem(submenu("Mood", [("Live", model.forcedMood == nil, { model.forcedMood = nil })]
-            + Mood.allCases.map { mood in (mood.rawValue.capitalized, model.forcedMood == mood, { model.forcedMood = mood }) }))
+        let mood = submenu("Mood", [("Live", model.forcedMood == nil, { model.forcedMood = nil })]
+            + Mood.allCases.map { mood in (mood.rawValue.capitalized, model.forcedMood == mood, { model.forcedMood = mood }) })
+        mood.isEnabled = model.showClaude
+        menu.addItem(mood)
+        // Astra: a held mood, or one animation now. Ember falls, and Live from Ember re-ignites.
+        let codex = submenu("Codex", [("Live", model.forcedCodexMood == nil, { model.forcedCodexMood = nil })]
+            + AstraMood.allCases.map { mood in (mood.rawValue.capitalized, model.forcedCodexMood == mood, { model.forcedCodexMood = mood }) }
+            + [("Twinkle", "twinkle"), ("Spin", "spin"), ("Task done", "done"), ("Window reset", "sparkle"), ("Hello, Clawd", "duo"), ("Back to the sky", "fade")]
+                .map { item in ("Play: " + item.0, false, { model.codexDevAct = item.1 }) })
+        codex.isEnabled = model.showCodex
+        menu.addItem(codex)
         let phase = submenu("Time of day", [("By the clock", model.forcedPhase == nil, { model.forcedPhase = nil })]
             + SkyPhase.allCases.map { phase in (phase.rawValue.capitalized, model.forcedPhase == phase, { model.forcedPhase = phase }) })
         let weather = submenu("Weather", [("Live", model.forcedWeather == nil, { model.forcedWeather = nil })]

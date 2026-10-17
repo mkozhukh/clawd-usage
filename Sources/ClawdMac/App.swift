@@ -18,7 +18,9 @@ struct ClawdMain {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var model: AppModel!
     private var panel: NSPanel!
-    private var statusItem: NSStatusItem!
+    /// One menu bar item per harness; created in this order, so Codex sits left of Claude.
+    private var claudeItem: NSStatusItem!
+    private var codexItem: NSStatusItem!
     private var preferences: NSWindow?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -38,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         model.forcedPhase = argument("--sky").flatMap { SkyPhase(rawValue: $0) }
         model.forcedWeather = argument("--weather").flatMap { Int($0) }
+        model.forcedCodexMood = argument("--astra").flatMap { AstraMood(rawValue: $0) }
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 340, height: 410),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Clawd"
@@ -53,13 +56,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.setFrameAutosaveName(demo ? "ClawdDemoPanel" : "ClawdPanel")
         if !panel.setFrameUsingName(demo ? "ClawdDemoPanel" : "ClawdPanel") { panel.center() }
         model.onWindowPreferences = { [weak self] in self?.applyWindowPreferences() }
-        model.onUsage = { [weak self] in self?.updateStatusItem() }
+        model.onUsage = { [weak self] in self?.updateStatusItems() }
         model.$contentHeight.removeDuplicates().sink { [weak self] _ in DispatchQueue.main.async { self?.resizePanel() } }.store(in: &cancellables)
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.target = self
-        statusItem.button?.action = #selector(statusClicked)
-        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        updateStatusItem()
+        claudeItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        codexItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        for item in [claudeItem!, codexItem!] {
+            item.button?.target = self
+            item.button?.action = #selector(statusClicked(_:))
+            item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            item.button?.imagePosition = .imageLeading
+            item.button?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        }
+        claudeItem.button?.image = Self.clawdIcon
+        codexItem.button?.image = Self.astraIcon
+        updateStatusItems()
         applyWindowPreferences()
         keepOnScreen()
         panel.orderFrontRegardless()
@@ -111,16 +121,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         frame.origin.y = max(area.minY, min(frame.minY, area.maxY - frame.height))
         panel.setFrame(frame, display: true)
     }
-    private func updateStatusItem() {
-        guard statusItem != nil else { return }
-        let percent = model.usage?.session.percent
-        statusItem.button?.image = Self.clawdIcon
-        statusItem.button?.imagePosition = .imageLeading
-        statusItem.button?.title = " " + (percent.map { "\($0)%" } ?? "—") + (model.error != nil ? " !" : "")
-        statusItem.button?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        statusItem.button?.toolTip = "Clawd · " + (percent.map { "Session \($0)%" } ?? "Waiting for usage")
-            + (model.usage?.week.map { " · Week \($0.percent)%" } ?? "")
+    /// Each harness that is on for the menu bar shows its own icon and main percentage. With both
+    /// off, Clawd's icon stays alone, without numbers: the only way back to the widget and Settings.
+    private func updateStatusItems() {
+        guard claudeItem != nil else { return }
+        claudeItem.isVisible = model.claudeInMenuBar || !model.codexInMenuBar
+        codexItem.isVisible = model.codexInMenuBar
+        if model.claudeInMenuBar {
+            let percent = model.usage?.session.percent
+            claudeItem.button?.title = " " + (percent.map { "\($0)%" } ?? "—") + (model.error != nil ? " !" : "")
+            claudeItem.button?.toolTip = "Claude · " + (percent.map { "Session \($0)%" } ?? "Waiting for usage")
+                + (model.usage?.week.map { " · Week \($0.percent)%" } ?? "")
+        } else {
+            claudeItem.button?.title = ""
+            claudeItem.button?.toolTip = "Clawd"
+        }
+        if model.codexInMenuBar {
+            let percent = model.codex?.limits.first?.limit.percent
+            codexItem.button?.title = " " + (percent.map { "\($0)%" } ?? "—") + (model.codexError != nil ? " !" : "")
+            codexItem.button?.toolTip = "Codex · " + (model.codex.map { $0.limits.map { "\($0.title.lowercased()) \($0.limit.percent)%" }.joined(separator: ", ") } ?? "Waiting for usage")
+        }
     }
+    /// Astra, the Codex star, in the same 1 pt pixels as Clawd's icon, eyes cut out.
+    private static let astraIcon: NSImage = {
+        let rows = ["........##........", ".......####.......", "......######......", "....##########....", "######.####.######",
+                    "######.####.######", "....##########....", "......######......", ".......####.......", "........##........"]
+        let image = NSImage(size: NSSize(width: 18, height: rows.count), flipped: true) { _ in
+            NSColor.black.setFill()
+            for (y, row) in rows.enumerated() { for (x, c) in row.enumerated() where c == "#" { NSRect(x: x, y: y, width: 1, height: 1).fill() } }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
     /// Clawd standing, from the widget's sprite: 18×10 pixels of 1 pt (sharp on Retina), eyes cut out.
     /// A template image, so the menu bar tints it for light and dark appearance.
     private static let clawdIcon: NSImage = {
@@ -134,7 +167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         image.isTemplate = true
         return image
     }()
-    @objc private func statusClicked() {
+    @objc private func statusClicked(_ sender: NSStatusBarButton) {
+        guard let statusItem = [claudeItem, codexItem].first(where: { $0?.button === sender }) ?? claudeItem else { return }
         if NSApp.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
             menu.addItem(withTitle: panel.isVisible ? "Hide widget" : "Show widget", action: #selector(togglePanel), keyEquivalent: "")
@@ -158,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
     @objc private func showPreferences() {
         if preferences == nil {
-            preferences = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 645), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            preferences = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 820), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             preferences?.title = "Clawd Settings"
             preferences?.contentView = NSHostingView(rootView: PreferencesView(model: model))
             preferences?.isReleasedWhenClosed = false

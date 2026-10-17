@@ -45,6 +45,74 @@ public enum CoreChecks {
                 throw Failure(description: "Accepted invalid usage output")
             } catch is UsageParser.ParseError { count += 1 }
         }
+        // Codex app-server reply: a five-hour and a weekly window, plus a model-specific limit.
+        let codexReply = Data(#"""
+        {"id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":18.4,"windowDurationMins":300,"resetsAt":1792663362},"secondary":{"usedPercent":41,"windowDurationMins":10080,"resetsAt":null},"planType":"plus","futureField":1},
+        "rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":18,"windowDurationMins":300}},"codex_spark":{"limitId":"codex_spark","limitName":"Spark","primary":{"usedPercent":130,"windowDurationMins":1440}}}}}
+        """#.utf8)
+        let codex = try CodexUsageParser.parse(codexReply, now: date("2026-10-17T00:00:00Z"))
+        try check(codex.limits.map(\.title) == ["5H", "WEEK", "SPARK · DAY"], "codex window titles")
+        try check(codex.limits[0].limit.percent == 18 && codex.limits[0].limit.resetsAt == Date(timeIntervalSince1970: 1792663362), "codex percent and reset")
+        try check(codex.limits[1].limit.resetsAt == nil && codex.limits[2].limit.percent == 100 && codex.plan == "plus", "codex optional reset, clamp, plan")
+        let weekOnly = try CodexUsageParser.parse(Data(#"{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":18,"windowDurationMins":10080},"secondary":null}}}"#.utf8))
+        try check(weekOnly.limits.map(\.title) == ["WEEK"], "codex plan with one window")
+        for minutes in [(60, "1H"), (43200, "30D"), (90, "90M"), (0, "LIMIT")] {
+            try check(CodexUsageParser.windowTitle(minutes: minutes.0) == minutes.1, "codex window \(minutes.0)")
+        }
+        for invalid in [#"{"id":2,"error":{"code":-32600,"message":"not logged in"}}"#, #"{"id":2,"result":{"rateLimits":{"primary":null}}}"#, #"{"id":2,"result":{}}"#] {
+            do {
+                _ = try CodexUsageParser.parse(Data(invalid.utf8))
+                throw Failure(description: "Accepted invalid Codex reply")
+            } catch is CodexUsageParser.ParseError { count += 1 }
+        }
+        try check(try JSONDecoder().decode(CodexUsage.self, from: JSONEncoder().encode(codex)) == codex, "codex storage round trip")
+
+        // Codex resets and peak: a window restarted when its reset moved later and usage dropped.
+        func codexAt(_ percent: Int, _ reset: Double?, _ title: String = "5H") -> CodexUsage {
+            CodexUsage(limits: [.init(title: title, limit: .init(percent: percent, resetsAt: reset.map(Date.init(timeIntervalSince1970:))))])
+        }
+        try check(codexAt(3, 2000).didReset(from: codexAt(100, 1000)) && codex.peak == 100, "codex window reset and peak")
+        try check(!codexAt(30, 1000).didReset(from: codexAt(20, 1000)) && !codexAt(3, 2000).didReset(from: codexAt(90, 1000, "WEEK"))
+                  && !codexAt(3, nil).didReset(from: codexAt(90, 1000)), "codex no reset without a later reset time")
+
+        // Codex session log, shaped like Codex 0.155 rollouts: unrelated lines are skipped,
+        // a task stays open until its task_complete, and a half-written line waits.
+        var rollout = CodexRollout()
+        let log = """
+        {"timestamp":"2026-10-17T11:46:47.291Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}
+        {"timestamp":"2026-10-17T11:48:05.887Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1","started_at":1792237685}}
+        {"timestamp":"2026-10-17T11:48:06.501Z","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-6-astra","effort":"medium"}}
+        {"timestamp":"2026-10-17T11:48:11.688Z","type":"response_item","payload":{"type":"message","content":"mentions task_complete"}}
+        not json at all, task_started
+        {"timestamp":"2026-10-17T11:48:49.411Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","completed_at":1792237729}}
+        {"timestamp":"2026-10-17T11:50:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}
+        {"timestamp":"2026-10-17T11:51:00.000Z","type":"event_msg","payload":{"type":"task_comp
+        """
+        let consumed = rollout.feed(Data(log.utf8))
+        try check(rollout.model == "gpt-6-astra" && rollout.openTurns == ["t2"], "codex rollout model and open turn")
+        try check(rollout.lastFinished == Date(timeIntervalSince1970: 1792237729) && consumed < log.utf8.count, "codex rollout finish time and partial line")
+        try check(rollout.feed(Data(#"lete","turn_id":"t2"}}"#.utf8)) == 0 && rollout.openTurns == ["t2"], "codex rollout waits for a newline")
+        var aborted = rollout
+        aborted.apply(Data(#"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t2","reason":"interrupted"}}"#.utf8))
+        try check(aborted.openTurns.isEmpty && aborted.lastFinished == rollout.lastFinished, "codex aborted turn is not a finish")
+        let logNow = date("2026-10-17T12:00:00Z")
+        var other = CodexRollout(); other.model = "gpt-6-sol"; other.openTurns = ["x"]
+        let activity = CodexActivity.resolve([(rollout, logNow.addingTimeInterval(-60)), (other, logNow.addingTimeInterval(-3600))],
+                                             configuredModel: "gpt-6-luna", now: logNow)
+        try check(activity.busy == 1 && activity.model == "gpt-6-astra" && activity.lastActive == logNow.addingTimeInterval(-60), "codex activity: stale open turn is not busy")
+        try check(CodexActivity.resolve([], configuredModel: "gpt-6-luna", now: logNow) == CodexActivity(model: "gpt-6-luna"), "codex activity falls back to config")
+        // Running processes decide the sessions and the busy count: the stale log's open turn no longer matters.
+        var live = activity
+        live.apply(live: [(9, "/work/b", other), (4, "/work/a", nil), (7, "/work/c", rollout)])
+        try check(live.sessions.map(\.pid) == [4, 7, 9] && live.sessions.map(\.status) == ["idle", "busy", "busy"] && live.busy == 2, "codex live sessions")
+        live.apply(live: [])
+        try check(live.sessions.isEmpty && live.busy == 0 && live.model == activity.model, "codex no running sessions")
+        try check(CodexConfig.model(toml: "# defaults\nmodel = \"gpt-6-astra\"  # main\n[profiles.fast]\nmodel = \"gpt-6-sol\"") == "gpt-6-astra", "codex config model")
+        try check(CodexConfig.model(toml: "approval_policy = \"never\"\n[profiles.fast]\nmodel = \"gpt-6-sol\"") == nil, "codex config ignores profile models")
+        for (model, family) in [("gpt-6-astra", CodexFamily.astra), ("GPT-6-Sol-mini", .sol), ("gpt-6.1-luna", .luna), ("tera", .tera), ("gpt-7", .astra), (nil, .astra)] {
+            try check(CodexFamily.resolve(model: model) == family, "codex family \(model ?? "nil")")
+        }
+
         let busy = Session(pid: 1, cwd: "/tmp", status: "busy")
         let waiting = Session(pid: 2, cwd: "/tmp", status: "waiting")
         try check(Mood.resolve(percent: 100, sessions: [busy, waiting]) == .dead, "exhausted priority")
@@ -70,6 +138,21 @@ public enum CoreChecks {
         try check(ClawdSprite.sequences["jump"]?.count == 12 && ClawdSprite.sequences["turn"]?.count == 19, "Claude Code sequence lengths")
         try check(ClawdSprite.clickActs.contains("wink") && !ClawdSprite.clickActs.contains("waddle") && !ClawdSprite.clickActs.contains("celebrate"), "click animations start in place")
         try check(HealthTier.tier(halves: 6).hop == 300 && HealthTier.tier(halves: 1).stagger && HealthTier.tier(halves: 0).speed == 0, "health tiers")
+
+        // Astra: points, eyes and turning stay inside the 18x12 frame; the back has no eyes.
+        let star = AstraSprite.geometry(AstraFrame())
+        try check(star.eyes.count == 4 && !star.body.isEmpty && (star.body + star.eyes + star.glint).allSatisfy { $0.x >= 0 && $0.x + $0.w <= 18 && $0.y >= 0 && $0.y + $0.h <= 12 }, "astra default pose")
+        let lit = { (f: AstraFrame) in AstraSprite.cells(f).joined().filter { $0 != 0 }.count }
+        try check(lit(AstraFrame(points: "tiny")) < lit(AstraFrame(points: "short")) && lit(AstraFrame(points: "short")) < lit(AstraFrame()), "astra points shrink")
+        try check(AstraSprite.geometry(AstraFrame(points: "flare")).glint.count > AstraSprite.geometry(AstraFrame()).glint.count, "astra flare glints")
+        try check(AstraSprite.geometry(AstraFrame(squash: -0.6)).eyes.isEmpty && AstraSprite.cells(AstraFrame(squash: 0.05)).joined().filter { $0 != 0 }.count <= 24, "astra back and edge")
+        try check(AstraSprite.cells(AstraFrame(look: 1)).map { $0.firstIndex(of: 2) } != AstraSprite.cells(AstraFrame()).map { $0.firstIndex(of: 2) }, "astra looks sideways")
+        let quiet = date("2026-10-17T12:00:00Z")
+        try check(AstraMood.resolve(peak: 100, busy: true, lastActive: quiet, now: quiet) == .ember, "astra ember wins")
+        try check(AstraMood.resolve(peak: 90, busy: true, lastActive: quiet, now: quiet) == .comet && AstraMood.resolve(peak: 85, busy: false, lastActive: quiet, now: quiet) == .low, "astra comet then low")
+        try check(AstraMood.resolve(peak: 10, busy: false, lastActive: quiet.addingTimeInterval(-3600), now: quiet) == .doze
+                  && AstraMood.resolve(peak: 10, busy: false, lastActive: nil, now: quiet) == .doze
+                  && AstraMood.resolve(peak: nil, busy: false, lastActive: quiet.addingTimeInterval(-60), now: quiet) == .hover, "astra doze and hover")
 
         // Weather and sky rules.
         try check(WeatherKind.resolve(code: 65).rain == 16 && WeatherKind.resolve(code: 61).rain == 7, "rain intensity by code")

@@ -59,10 +59,51 @@ read or store credentials.
 
 Session files come from `~/.claude/sessions/*.json`.
 
+**Codex.** When the Codex CLI is installed and signed in, its rate limits
+(five-hour, weekly or whatever windows the plan has) appear under the Claude
+rows. They are read from `codex app-server` (`account/rateLimits/read`) with
+Codex's own login; no model is run and no usage is spent. Discovery checks the
+same locations as for Claude plus fnm's default alias, Volta, `~/.npm-global`
+and Bun. The app server is
+marked experimental by OpenAI, so a Codex update may change it. Without Codex
+the section stays hidden.
+
+**Settings** has a group each for Claude and Codex: the executable (detected
+automatically or chosen), "Show in widget" and "Show in menu bar". By default
+both are shown in the widget and only Claude in the menu bar. A harness whose
+executable is not found counts as off everywhere. When only Codex is shown, it
+supplies the big percentage, the hearts and the header ("CODEX USAGE"); with
+both shown, Claude does. With both off the widget shows only the sky, and
+Clawd's menu bar icon stays (without numbers) so the widget and Settings remain
+reachable.
+
+**Astra**, the Codex mascot, is a pixel star that floats above the session bar
+while Codex is shown (Clawd stays on the ground). It hovers and twinkles, flies
+edge to edge with a comet tail while a Codex task runs, jumps with a ring of
+glints when a task finishes, flickers once a Codex limit reaches 80%, falls
+and lies half-buried as an ember at 100% and re-ignites when the window resets,
+and dozes after 30 quiet minutes. If both windows reset close together, Astra
+and Clawd greet each other. Turning Codex off shrinks Astra into a sky star.
+Click it to make it spin. Right-click → Codex previews each state, and
+`--astra hover|low|ember|doze|comet` holds one for snapshots.
+
+The session list covers both: Claude sessions from `~/.claude/sessions`, Codex
+sessions from the running `codex` processes (their working folder and the
+session log each holds open). With both shown, each has its own heading.
+
+What Codex is doing (a task running or just finished, the model in use) comes
+from its session logs, `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (or under
+`$CODEX_HOME`), polled every 2 seconds. Only task and turn events are decoded,
+and only logs from today and yesterday written in the last 6 hours, plus logs a
+running Codex holds open, are followed; older history is never scanned. The default model falls
+back to `model` in `~/.codex/config.toml`. The log format is Codex's own, so a
+change there only turns these signals off; the limits keep working.
+
 The last usage report is stored at:
 
 ```
 ~/Library/Application Support/ClawdMac/last-usage.json
+~/Library/Application Support/ClawdMac/last-codex-usage.json
 ```
 
 Preferences and window position use the `dev.clawd.mac` defaults domain. Demo
@@ -77,9 +118,9 @@ swift run ClawdChecks
 swift run ClawdMac --demo
 ```
 
-- `Sources/ClawdCore`: portable usage parser, data models, mood/health rules.
+- `Sources/ClawdCore`: portable Claude and Codex usage parsers, data models, mood/health rules.
 - `Sources/ClawdMac`: AppKit lifecycle, SwiftUI views, polling and persistence.
-- `Tests/ClawdCoreTests`: parser compatibility, dates, mood priority, storage format.
+- `Tests/ClawdCoreTests`: Claude and Codex parser compatibility, dates, mood priority, storage format.
 
 `swift run ClawdChecks` works with Command Line Tools alone. `swift test` runs the
 same checks through XCTest when a full Xcode installation is selected.

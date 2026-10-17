@@ -17,17 +17,30 @@ final class ChildProcesses: @unchecked Sendable {
     func terminateAll() { lock.withLock { for pid in ids { kill(pid, SIGTERM) } } }
 }
 
+/// The first executable among the usual install locations and the inherited PATH, or the one chosen in Settings.
+private func findExecutable(_ name: String, custom: String, extra: [String] = []) -> URL? {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let candidates = custom.isEmpty
+        ? (["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"] + extra.map { "\(home)/\($0)" }
+           + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)).map { "\($0)/\(name)" }
+        : [(custom as NSString).expandingTildeInPath]
+    return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map(URL.init(fileURLWithPath:))
+}
+
+/// The child's PATH starts with the executable's own folder, so an npm-installed script finds its node.
+private func childEnvironment(for executable: URL) -> [String: String] {
+    var environment = ProcessInfo.processInfo.environment
+    environment["PATH"] = "\(executable.deletingLastPathComponent().path):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (environment["PATH"] ?? "")
+    environment.removeValue(forKey: "CLAUDECODE")
+    return environment
+}
+
 enum ClaudeCLI {
     static func executable(custom: String) throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = custom.isEmpty
-            ? ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
-              + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { "\($0)/claude" }
-            : [(custom as NSString).expandingTildeInPath]
-        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+        guard let url = findExecutable("claude", custom: custom) else {
             throw ServiceError.message("Claude Code was not found. Install and sign in to Claude Code, or choose its executable in Settings.")
         }
-        return URL(fileURLWithPath: path)
+        return url
     }
 
     // File-backed output avoids pipe-buffer deadlocks, including unusually large /usage reports.
@@ -51,10 +64,7 @@ enum ClaudeCLI {
             process.standardError = errHandle
             process.standardInput = FileHandle.nullDevice
             process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-            var environment = ProcessInfo.processInfo.environment
-            environment["PATH"] = "\(executable.deletingLastPathComponent().path):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (environment["PATH"] ?? "")
-            environment.removeValue(forKey: "CLAUDECODE")
-            process.environment = environment
+            process.environment = childEnvironment(for: executable)
             try process.run()
             let pid = process.processIdentifier
             ChildProcesses.shared.insert(pid)
@@ -79,6 +89,82 @@ enum ClaudeCLI {
     }
 }
 
+enum CodexCLI {
+    enum Failure: Error { case notInstalled }
+
+    /// npm installs under fnm, nvm-less Volta and a custom npm prefix are not on a GUI app's PATH.
+    static func executable(custom: String) -> URL? {
+        findExecutable("codex", custom: custom, extra: [".local/share/fnm/aliases/default/bin", ".volta/bin", ".npm-global/bin", ".bun/bin"])
+    }
+
+    /// Asks `codex app-server` for the account's rate limits over JSON-RPC on stdio. This uses the
+    /// existing Codex login and runs no model. Throws `Failure.notInstalled` when nothing was found
+    /// automatically, so a missing Codex is not an error.
+    static func rateLimits(custom: String, timeout: TimeInterval = 20) async throws -> Data {
+        guard let executable = executable(custom: custom) else {
+            if custom.isEmpty { throw Failure.notInstalled }
+            throw ServiceError.message("Codex was not found at \(custom). Choose its executable in Settings.")
+        }
+        return try await Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = ["app-server"]
+            process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+            process.environment = childEnvironment(for: executable)
+            let input = Pipe(), output = Pipe()
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            // stdout is drained as it arrives, so the pipe buffer never fills; the reply is the line with id 2.
+            let reply = ReplyBuffer()
+            output.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if chunk.isEmpty { handle.readabilityHandler = nil } else { reply.append(chunk) }
+            }
+            try process.run()
+            let pid = process.processIdentifier
+            ChildProcesses.shared.insert(pid)
+            defer {
+                output.fileHandleForReading.readabilityHandler = nil
+                if process.isRunning { process.terminate() }
+                let grace = Date().addingTimeInterval(1)
+                while process.isRunning && Date() < grace { usleep(50_000) }
+                if process.isRunning { kill(pid, SIGKILL) }
+                ChildProcesses.shared.remove(pid)
+            }
+            let requests = [
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"clawd-mac","version":"0.1.0"}}}"#,
+                #"{"jsonrpc":"2.0","method":"initialized"}"#,
+                #"{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}"#
+            ]
+            try input.fileHandleForWriting.write(contentsOf: Data((requests.joined(separator: "\n") + "\n").utf8))
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if let line = reply.line(id: 2) { return line }
+                if !process.isRunning {
+                    throw ServiceError.message("Codex exited with code \(process.terminationStatus). Run codex login in Terminal.")
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            throw ServiceError.message("Codex timed out after \(Int(timeout)) seconds. Last known usage is retained.")
+        }.value
+    }
+
+    /// Lines read so far from the app server, filled from its reading thread.
+    private final class ReplyBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+        func append(_ chunk: Data) { lock.withLock { data.append(chunk) } }
+        func line(id: Int) -> Data? {
+            lock.withLock {
+                data.split(separator: UInt8(ascii: "\n")).first { line in
+                    (try? JSONSerialization.jsonObject(with: line) as? [String: Any])?["id"] as? Int == id
+                }.map { Data($0) }
+            }
+        }
+    }
+}
+
 enum SessionReader {
     static func read() async -> [Session] {
         await Task.detached(priority: .utility) {
@@ -97,6 +183,118 @@ enum SessionReader {
                 return session
             }.sorted { $0.pid < $1.pid }
         }.value
+    }
+}
+
+/// Follows Codex session logs, reading only what was appended since the last call, so a poll every
+/// few seconds stays cheap. Logs come from today's and yesterday's folders, plus any log a running
+/// Codex holds open: a resumed session keeps writing its first day's log, however old. The whole
+/// history is never walked. Logs are kept by path and checked through a fresh URL each time,
+/// since a URL caches its size and date after the first look.
+actor CodexActivityReader {
+    private struct Log { var offset = 0; var rollout = CodexRollout(); var modified = Date.distantPast }
+    private var logs: [String: Log] = [:]
+    private var lastConfig = Date.distantPast
+    private var configuredModel: String?
+    /// Logs untouched for longer are dropped, unless a running Codex still holds them.
+    private let horizon: TimeInterval = 6 * 3600
+    private let home: URL = ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+
+    func read(now: Date = .now) -> CodexActivity {
+        if now.timeIntervalSince(lastConfig) > 60 {
+            lastConfig = now
+            configuredModel = (try? String(contentsOf: home.appendingPathComponent("config.toml"), encoding: .utf8)).flatMap(CodexConfig.model(toml:))
+        }
+        let live = CodexProcesses.list()
+        let held = Set((live ?? []).compactMap { $0.rollout?.path })
+        var found = Set(logs.keys).union(held)
+        let sessions = home.appendingPathComponent("sessions")
+        for day in [now, now.addingTimeInterval(-86400)] {
+            let parts = Calendar.current.dateComponents([.year, .month, .day], from: day)
+            let folder = sessions.appendingPathComponent(String(format: "%04d/%02d/%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0))
+            for url in (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            where url.lastPathComponent.hasPrefix("rollout-") && url.pathExtension == "jsonl" {
+                found.insert(url.standardizedFileURL.path)
+            }
+        }
+        for path in found {
+            let url = URL(fileURLWithPath: path)
+            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+                  let modified = values.contentModificationDate, let size = values.fileSize,
+                  now.timeIntervalSince(modified) < horizon || held.contains(path) else { logs[path] = nil; continue }
+            var log = logs[path] ?? Log()
+            if size < log.offset { log = Log() }  // rewritten from scratch
+            if size > log.offset, let handle = try? FileHandle(forReadingFrom: url) {
+                defer { try? handle.close() }
+                if (try? handle.seek(toOffset: UInt64(log.offset))) != nil, let data = try? handle.readToEnd() {
+                    log.offset += log.rollout.feed(data)
+                }
+            }
+            log.modified = modified
+            logs[path] = log
+        }
+        var activity = CodexActivity.resolve(logs.values.map { ($0.rollout, $0.modified) }, configuredModel: configuredModel, now: now)
+        if let live { activity.apply(live: live.map { ($0.pid, $0.cwd, $0.rollout.flatMap { logs[$0.path]?.rollout }) }) }
+        return activity
+    }
+}
+
+/// Running Codex processes: the native `codex` binary (the npm wrapper is a separate `node`
+/// process), its working directory, and the session log it holds open. The widget's own
+/// app-server queries are left out.
+enum CodexProcesses {
+    struct Entry { var pid: Int32; var cwd: String; var rollout: URL? }
+
+    /// nil when the process table could not be read; callers then fall back to the logs alone.
+    static func list() -> [Entry]? {
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else { return nil }
+        var pids = [Int32](repeating: 0, count: Int(count) + 32)
+        let filled = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
+        guard filled > 0 else { return nil }
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        return pids.prefix(Int(filled)).compactMap { pid -> Entry? in
+            guard pid > 0, !ChildProcesses.shared.contains(pid),
+                  proc_pidpath(pid, &path, UInt32(path.count)) > 0,
+                  URL(fileURLWithPath: String(decoding: path.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)).lastPathComponent == "codex" else { return nil }
+            var info = proc_vnodepathinfo()
+            guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, Int32(MemoryLayout<proc_vnodepathinfo>.size)) > 0 else { return nil }
+            return Entry(pid: pid, cwd: text(info.pvi_cdir.vip_path), rollout: rollout(of: pid))
+        }
+    }
+
+    private static func rollout(of pid: Int32) -> URL? {
+        let size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard size > 0 else { return nil }
+        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(size) / MemoryLayout<proc_fdinfo>.size + 8)
+        let used = fds.withUnsafeMutableBytes { proc_pidinfo(pid, PROC_PIDLISTFDS, 0, $0.baseAddress, Int32($0.count)) }
+        for fd in fds.prefix(Int(used) / MemoryLayout<proc_fdinfo>.size) where fd.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) {
+            var vnode = vnode_fdinfowithpath()
+            guard proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDVNODEPATHINFO, &vnode, Int32(MemoryLayout<vnode_fdinfowithpath>.size)) > 0 else { continue }
+            let file = URL(fileURLWithPath: text(vnode.pvip.vip_path))
+            if file.lastPathComponent.hasPrefix("rollout-") && file.pathExtension == "jsonl" { return file.standardizedFileURL }
+        }
+        return nil
+    }
+
+    /// A fixed-size C path buffer imported as a tuple.
+    private static func text<T>(_ tuple: T) -> String {
+        withUnsafeBytes(of: tuple) { String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self) }
+    }
+}
+
+/// The last Codex limits, shown at launch until the first refresh.
+actor CodexStorage {
+    private let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("ClawdMac/last-codex-usage.json")
+    func load() throws -> CodexUsage? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try JSONDecoder().decode(CodexUsage.self, from: Data(contentsOf: url))
+    }
+    func save(_ usage: CodexUsage) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(usage).write(to: url, options: .atomic)
     }
 }
 
