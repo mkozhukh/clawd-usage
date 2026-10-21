@@ -3,8 +3,8 @@
 <plist version="1.0"><dict>
     <key>CFBundleName</key><string>Clawd</string>
     <key>CFBundleDisplayName</key><string>Clawd</string>
-    <key>CFBundleIdentifier</key><string>dev.clawd.mac</string>
-    <key>CFBundleExecutable</key><string>ClawdMac</string>
+    <key>CFBundleIdentifier</key><string>ink.mono.clawd</string>
+    <key>CFBundleExecutable</key><string>ClawdUsage</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>

@@ -1,142 +1,55 @@
 # Clawd for Mac
 
-A native macOS menu bar companion for Claude Code, built with Swift, SwiftUI,
-and AppKit. The floating panel shows usage limits, live sessions, and a small
-pixel Clawd. Requires macOS 14 or later and Claude Code installed and signed in.
+A macOS menu bar widget that shows your Claude Code and Codex usage limits, live sessions, and a pixel Clawd who reacts to them.
 
 <p>
-  <img src="docs/demo.png" width="340" alt="Clawd widget in demo mode: usage limits, the sky and Clawd">
+  <a href="docs/demo-expanded.png">
+    <img src="docs/demo.png" width="340" alt="Clawd widget: usage limits, the sky and Clawd">
+  </a>
 </p>
 
-## Build and run
-
-Install Apple's Command Line Tools (`xcode-select --install`) with Swift 6 or
-newer. No external packages or full Xcode installation are needed.
+## Install
 
 ```sh
-cd clawd-usage-macwidget
+brew install --cask mkozhukh/tap/clawd
+```
+
+Requires macOS 14 or later and Claude Code installed and signed in.
+
+## Features
+
+- Claude Code five-hour and weekly limits in the widget and the menu bar
+- Codex rate limits, when the Codex CLI is installed and signed in
+- List of live Claude and Codex sessions
+- Uses the existing Claude and Codex logins; doesn't read or store credentials
+- Doesn't run models or spend usage
+
+## Build from source
+
+Requires Apple's Command Line Tools (`xcode-select --install`) with Swift 6 or newer. Full Xcode isn't needed.
+
+```sh
 ./scripts/build-app.sh
 open dist/Clawd.app
 ```
 
-For a preview with sample data and **no CLI or network calls**, quit any running
-copy first, then:
+Set `CODE_SIGN_IDENTITY` to sign with your own identity; otherwise the build is ad-hoc signed.
 
-```sh
-open dist/Clawd.app --args --demo
-```
-
-`./scripts/build-app.sh --snapshot` also captures compact and expanded demo
-previews in `dist/`, then quits. It requires a logged-in macOS desktop session.
-
-Drag the header to reposition the widget. Click its menu bar percentage to
-show/hide it; right-click for refresh, settings, and quit. Click Clawd for a
-heart and one of the Claude Code animations; right-click him or the sky to
-preview each mood, a time of day or a kind of weather (the current choice is
-checked). “Auto” restores live behavior. The same works from the command line,
-e.g. `--demo --sky night --weather 95` (a WMO weather code), also with
-`--snapshot`. Hover
-the usage row for the weather, wind and sunrise/sunset times.
-Click the sessions line to list the live sessions; the window grows to fit
-(a long list scrolls).
-
-The weather city is set in Settings: type three or more letters and pick
-the place from the list (Open-Meteo's geocoding, searched after a pause in
-typing, each text asked once per run). Leave it empty to find the location by
-IP; exact coordinates are under “Coordinates”.
-
-Move the app to Applications before enabling **Launch at login** in Settings.
-The build script ad-hoc signs the local app. Distribution to other computers
-requires a Developer ID signature and notarization; these are not configured.
-Set `CODE_SIGN_IDENTITY` to use your signing identity when building.
-
-## Data and compatibility
-
-Claude executable discovery checks `~/.local/bin/claude`, Homebrew locations,
-and the inherited PATH; Settings can override it. The app invokes the executable
-directly, never through a shell. It uses Claude's existing login and does not
-read or store credentials.
-
-Session files come from `~/.claude/sessions/*.json`.
-
-**Codex.** When the Codex CLI is installed and signed in, its rate limits
-(five-hour, weekly or whatever windows the plan has) appear under the Claude
-rows. They are read from `codex app-server` (`account/rateLimits/read`) with
-Codex's own login; no model is run and no usage is spent. Discovery checks the
-same locations as for Claude plus fnm's default alias, Volta, `~/.npm-global`
-and Bun. The app server is
-marked experimental by OpenAI, so a Codex update may change it. Without Codex
-the section stays hidden.
-
-**Settings** has a group each for Claude and Codex: the executable (detected
-automatically or chosen), "Show in widget" and "Show in menu bar". By default
-both are shown in the widget and only Claude in the menu bar. A harness whose
-executable is not found counts as off everywhere. When only Codex is shown, it
-supplies the big percentage, the hearts and the header ("CODEX USAGE"); with
-both shown, Claude does. With both off the widget shows only the sky, and
-Clawd's menu bar icon stays (without numbers) so the widget and Settings remain
-reachable.
-
-**Astra**, the Codex mascot, is a pixel star that floats above the session bar
-while Codex is shown (Clawd stays on the ground). It hovers and twinkles, flies
-edge to edge with a comet tail while a Codex task runs, jumps with a ring of
-glints when a task finishes, flickers once a Codex limit reaches 80%, falls
-and lies half-buried as an ember at 100% and re-ignites when the window resets,
-and dozes after 30 quiet minutes. If both windows reset close together, Astra
-and Clawd greet each other. Turning Codex off shrinks Astra into a sky star.
-Click it to make it spin. Right-click → Codex previews each state, and
-`--astra hover|low|ember|doze|comet` holds one for snapshots.
-
-The session list covers both: Claude sessions from `~/.claude/sessions`, Codex
-sessions from the running `codex` processes (their working folder and the
-session log each holds open). With both shown, each has its own heading.
-
-What Codex is doing (a task running or just finished, the model in use) comes
-from its session logs, `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (or under
-`$CODEX_HOME`), polled every 2 seconds. Only task and turn events are decoded,
-and only logs from today and yesterday written in the last 6 hours, plus logs a
-running Codex holds open, are followed; older history is never scanned. The default model falls
-back to `model` in `~/.codex/config.toml`. The log format is Codex's own, so a
-change there only turns these signals off; the limits keep working.
-
-The last usage report is stored at:
-
-```
-~/Library/Application Support/ClawdMac/last-usage.json
-~/Library/Application Support/ClawdMac/last-codex-usage.json
-```
-
-Preferences and window position use the `dev.clawd.mac` defaults domain. Demo
-mode uses separate preferences and never writes the real usage report. The app
-runs as the current user, outside App Sandbox, with no elevated helper.
-
-## Development
+Development:
 
 ```sh
 swift build
 swift run ClawdChecks
-swift run ClawdMac --demo
 ```
 
-- `Sources/ClawdCore`: portable Claude and Codex usage parsers, data models, mood/health rules.
-- `Sources/ClawdMac`: AppKit lifecycle, SwiftUI views, polling and persistence.
-- `Tests/ClawdCoreTests`: Claude and Codex parser compatibility, dates, mood priority, storage format.
-
-`swift run ClawdChecks` works with Command Line Tools alone. `swift test` runs the
-same checks through XCTest when a full Xcode installation is selected.
-
-Manual smoke check: start demo, drag the header, hide/show through the menu bar,
-expand details, inspect all mascot moods, toggle pin/all-Spaces, open settings,
-quit and relaunch. For live data, verify login and CLI path, refresh, then test
-an invalid executable path to check that old values survive and an error appears.
+- `Sources/ClawdCore` — usage parsers, data models, mood rules
+- `Sources/ClawdUsage` — AppKit app, SwiftUI views, polling, persistence
+- `Tests/ClawdCoreTests` — parser, date and storage checks
 
 ## License
 
 MIT © 2026 Maksim Kozhukh, see `LICENSE`.
-Source: <https://github.com/mkozhukh/clawd-usage-macwidget>.
 
-Based on [clawd-usage-winwidget](https://github.com/Enhed/clawd-usage-winwidget)
-by Venger Sergey (MIT). The Clawd sprite geometry, mascot behaviour, and sky and
-weather rules are ported from it; its notice is in `THIRD_PARTY_NOTICES`.
+Based on [clawd-usage-winwidget](https://github.com/Enhed/clawd-usage-winwidget) by Venger Sergey (MIT). The Clawd sprite, mascot behavior, and sky and weather rules are ported from it; see `THIRD_PARTY_NOTICES`.
 
 Not affiliated with Anthropic. Clawd and Claude belong to Anthropic.

@@ -14,6 +14,9 @@ let mascotW = Double(ClawdSprite.width) * mascotPx          // 36
 let mascotH = Double(ClawdSprite.height) * mascotPy         // 26.4
 let mascotSink = 2 * mascotPy                                // the empty lower half-row sits below the ground
 let mascotAreaHeight = 43.0                                  // usage row (40) plus the 3 px the area hangs below it
+/// The mascot canvas reaches this far up into the header's bottom padding, so Astra's halo
+/// is not cut off; the layout, the sky and the ground (the lower edge) stay where they are.
+let mascotBleed = 18.0
 
 struct MascotScene {
     var geometry = ClawdGeometry()
@@ -184,6 +187,9 @@ final class MascotEngine: ObservableObject {
         let span = max(0, areaWidth - mascotW)
         if x < 0 { x = span / 2 }
         if x > span { x = span }
+        // The area may have narrowed since the target was picked: an edge past the new one
+        // would never be reached, and he would keep running into the wall.
+        if let tg = target, tg > span { target = span }
 
         var mood = (forced ?? self.mood).rawValue
         let halves: Int? = forced == .dead ? 0 : percent.map { Mood.heartHalves(percent: $0) }
@@ -397,16 +403,20 @@ struct MascotView: View {
                                  at: CGPoint(x: b.x + 6, y: h - b.bottom), anchor: .bottom)
                 }
                 if !s.tag.isEmpty {
-                    context.draw(Text(s.tag).font(.system(size: 8)).foregroundColor(color(RGBA("#FF6B7280"))), at: .zero, anchor: .topLeading)
+                    context.draw(Text(s.tag).font(.system(size: 8)).foregroundColor(color(RGBA("#FF6B7280"))), at: CGPoint(x: 0, y: mascotBleed), anchor: .topLeading)
                 }
             }
+            .frame(height: geometry.size.height + mascotBleed)
             .onAppear { engine.areaWidth = geometry.size.width; astra.areaWidth = geometry.size.width }
             .onChange(of: geometry.size.width) { _, width in engine.areaWidth = width; astra.areaWidth = width }
-            .contentShape(Rectangle())
+            // Clicks only on the area itself, not on the bleed over the header. Hit shape and tap
+            // point are in canvas coordinates, so both come before the offset that lifts the canvas.
+            .contentShape(Path(CGRect(x: 0, y: mascotBleed, width: geometry.size.width, height: geometry.size.height)))
             .onTapGesture { point in
-                if astra.contains(point, height: geometry.size.height) { astra.click() }
+                if astra.contains(point, height: geometry.size.height + mascotBleed) { astra.click() }
                 else if model.showClaude { engine.click() }
             }
+            .offset(y: -mascotBleed)
         }
         .onContinuousHover { phase in
             switch phase {

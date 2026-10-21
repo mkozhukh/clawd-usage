@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClawdMac",
+    name: "ClawdUsage",
     platforms: [.macOS(.v14)],
-    products: [.executable(name: "ClawdMac", targets: ["ClawdMac"])],
+    products: [.executable(name: "ClawdUsage", targets: ["ClawdUsage"])],
     targets: [
         .target(name: "ClawdCore"),
-        .executableTarget(name: "ClawdMac", dependencies: ["ClawdCore"]),
+        .executableTarget(name: "ClawdUsage", dependencies: ["ClawdCore"]),
         .target(name: "ClawdCoreChecks", dependencies: ["ClawdCore"], path: "Tests/Support"),
         .executableTarget(name: "ClawdChecks", dependencies: ["ClawdCoreChecks"], path: "Checks"),
         .testTarget(name: "ClawdCoreTests", dependencies: ["ClawdCoreChecks"])

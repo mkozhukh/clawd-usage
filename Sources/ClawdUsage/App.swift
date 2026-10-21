@@ -167,20 +167,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         image.isTemplate = true
         return image
     }()
+    /// Either click opens the menu; the widget is shown or hidden from there.
     @objc private func statusClicked(_ sender: NSStatusBarButton) {
         guard let statusItem = [claudeItem, codexItem].first(where: { $0?.button === sender }) ?? claudeItem else { return }
-        if NSApp.currentEvent?.type == .rightMouseUp {
-            let menu = NSMenu()
-            menu.addItem(withTitle: panel.isVisible ? "Hide widget" : "Show widget", action: #selector(togglePanel), keyEquivalent: "")
-            menu.addItem(withTitle: "Refresh usage", action: #selector(refresh), keyEquivalent: "r")
-            menu.addItem(.separator())
-            menu.addItem(withTitle: "Settings…", action: #selector(showPreferences), keyEquivalent: ",")
-            menu.addItem(withTitle: "Quit Clawd", action: #selector(quit), keyEquivalent: "q")
-            for item in menu.items { item.target = self }
-            statusItem.menu = menu
-            statusItem.button?.performClick(nil)
-            statusItem.menu = nil
-        } else { togglePanel() }
+        let menu = NSMenu()
+        menu.addItem(withTitle: panel.isVisible ? "Hide widget" : "Show widget", action: #selector(togglePanel), keyEquivalent: "")
+        menu.addItem(withTitle: "Refresh usage", action: #selector(refresh), keyEquivalent: "r")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Settings…", action: #selector(showPreferences), keyEquivalent: ",")
+        menu.addItem(withTitle: "Quit Clawd", action: #selector(quit), keyEquivalent: "q")
+        for item in menu.items { item.target = self }
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
     }
     @objc private func togglePanel() {
         if panel.isVisible { panel.orderOut(nil); model.visible = false }

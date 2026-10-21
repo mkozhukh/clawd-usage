@@ -40,6 +40,8 @@ final class AppModel: ObservableObject {
     @Published var topmost: Bool { didSet { defaults.set(topmost, forKey: "topmost"); onWindowPreferences?() } }
     @Published var allSpaces: Bool { didSet { defaults.set(allSpaces, forKey: "allSpaces"); onWindowPreferences?() } }
     @Published var showSky: Bool { didSet { defaults.set(showSky, forKey: "showSky") } }
+    /// Only the header, the mascot row and the reset line.
+    @Published var minimal: Bool { didSet { defaults.set(minimal, forKey: "minimal") } }
     @Published var zoom: Double { didSet { defaults.set(zoom, forKey: "zoom"); onWindowPreferences?() } }
     @Published var cliPath: String { didSet { defaults.set(cliPath, forKey: "cliPath"); detect() } }
     @Published var codexPath: String { didSet { defaults.set(codexPath, forKey: "codexPath"); detect() } }
@@ -65,13 +67,14 @@ final class AppModel: ObservableObject {
 
     init(demo: Bool) {
         self.demo = demo
-        defaults = demo ? UserDefaults(suiteName: "dev.clawd.mac.demo")! : .standard
+        defaults = demo ? UserDefaults(suiteName: "ink.mono.clawd.demo")! : .standard
         defaults.register(defaults: ["topmost": true, "allSpaces": false, "showSky": true, "zoom": 1.0,
                                      "claudeEnabled": true, "claudeMenuBar": true, "codexEnabled": true, "codexMenuBar": false])
         expanded = defaults.bool(forKey: "expanded")
         topmost = defaults.bool(forKey: "topmost")
         allSpaces = defaults.bool(forKey: "allSpaces")
         showSky = defaults.bool(forKey: "showSky")
+        minimal = defaults.bool(forKey: "minimal")
         zoom = [1.0, 1.2, 1.5].contains(defaults.double(forKey: "zoom")) ? defaults.double(forKey: "zoom") : 1.0
         cliPath = defaults.string(forKey: "cliPath") ?? ""
         codexPath = defaults.string(forKey: "codexPath") ?? ""

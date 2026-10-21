@@ -68,29 +68,32 @@ struct WidgetView: View {
                             bar(model.mainLimit?.percent, color: levelColor(model.mainLimit?.percent), height: 6).padding(.top, 1)
                             Text(mainResetText).font(.system(size: 11)).foregroundStyle(resetColor).padding(.top, 7)
                         }
-                        if model.showClaude {
+                        if model.showClaude && !model.minimal {
                             if let week = model.usage?.week { limitRow("WEEK", week, color: barWeek).padding(.top, 9) }
                             ForEach((model.usage?.extraWeeks ?? [:]).keys.sorted(), id: \.self) { key in
                                 if let value = model.usage?.extraWeeks[key] { limitRow("\(key.uppercased()) · WEEK", value, color: barModel).padding(.top, 7) }
                             }
                         }
                         // Codex limits under their own windows; the first one is the big number when Codex leads.
-                        if model.showCodex {
+                        if model.showCodex && !model.minimal {
                             ForEach(Array(codexRows.enumerated()), id: \.offset) { index, entry in
                                 limitRow("CODEX · \(entry.title)", entry.limit, color: barCodex).padding(.top, index == 0 ? 11 : 7)
                             }
                         }
                     }
-                    if model.primary != nil { statusLine }
+                    // Minimal mode stops at the reset line.
+                    if !model.minimal {
+                        if model.primary != nil { statusLine }
 
-                    if model.showClaude, let error = model.error { errorView(error) }
-                    if model.showClaude, let error = model.storageError { errorView(error) }
-                    if model.showCodex, let error = model.codexError { errorView(error) }
+                        if model.showClaude, let error = model.error { errorView(error) }
+                        if model.showClaude, let error = model.storageError { errorView(error) }
+                        if model.showCodex, let error = model.codexError { errorView(error) }
 
-                    if model.expanded { sessionList }
+                        if model.expanded { sessionList }
+                    }
                 }.padding(.horizontal, 18).padding(.bottom, 18)
 
-            if model.primary != nil { footer }
+            if model.primary != nil && !model.minimal { footer }
         }
         .foregroundStyle(Color(red: 0.91, green: 0.91, blue: 0.89))
         .background(Color(red: 0.09, green: 0.105, blue: 0.12))
@@ -262,6 +265,7 @@ struct PreferencesView: View {
                 Toggle("Keep widget on top", isOn: $model.topmost)
                 Toggle("Show on all Spaces", isOn: $model.allSpaces)
                 Toggle("Show sky and weather behind Clawd", isOn: $model.showSky)
+                Toggle("Minimal widget", isOn: $model.minimal)
                 Picker("Zoom", selection: $model.zoom) {
                     Text("1×").tag(1.0); Text("1.2×").tag(1.2); Text("1.5×").tag(1.5)
                 }.pickerStyle(.segmented)
@@ -301,7 +305,7 @@ struct PreferencesView: View {
         .formStyle(.grouped)
         // Tall enough for everything without scrolling; city matches or open
         // coordinates scroll. A grouped Form has no natural height to size by.
-        .frame(width: 460, height: 820)
+        .frame(width: 460, height: 850)
     }
 
     /// A path field with a file picker; empty means detect automatically. Below it, where the

@@ -287,7 +287,7 @@ enum CodexProcesses {
 /// The last Codex limits, shown at launch until the first refresh.
 actor CodexStorage {
     private let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("ClawdMac/last-codex-usage.json")
+        .appendingPathComponent("ClawdUsage/last-codex-usage.json")
     func load() throws -> CodexUsage? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return try JSONDecoder().decode(CodexUsage.self, from: Data(contentsOf: url))
@@ -304,7 +304,7 @@ actor SnapshotStorage {
     private let legacy: URL
     init() {
         let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ClawdMac")
+            .appendingPathComponent("ClawdUsage")
         url = directory.appendingPathComponent("last-usage.json")
         legacy = directory.appendingPathComponent("usage-history.json")
     }

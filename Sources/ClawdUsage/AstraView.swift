@@ -278,8 +278,8 @@ final class AstraEngine: ObservableObject {
     private func hash(_ n: Int) -> Double { let v = sin(Double(n) * 127.1 + 311.7) * 43758.5453; return v - floor(v) }
 }
 
-/// Draws Astra into the mascot area's canvas, behind Clawd. `h` is the area height; the
-/// ground is its lower edge, which also hides the sunk part of the ember.
+/// Draws Astra into the mascot area's canvas, behind Clawd. `h` is the canvas height (the area
+/// plus `mascotBleed` above it); the ground is its lower edge, which also hides the sunk part of the ember.
 @MainActor func drawAstra(_ context: GraphicsContext, _ a: AstraScene, size: CGSize) {
     guard a.visible else { return }
     var context = context
@@ -335,6 +335,6 @@ final class AstraEngine: ObservableObject {
         context.fill(path, with: .color(color(RGBA("#FFF87171")).opacity(love.opacity)))
     }
     if !a.tag.isEmpty {
-        context.draw(Text(a.tag).font(.system(size: 8)).foregroundColor(color(RGBA("#FF6B7280"))), at: CGPoint(x: size.width, y: 0), anchor: .topTrailing)
+        context.draw(Text(a.tag).font(.system(size: 8)).foregroundColor(color(RGBA("#FF6B7280"))), at: CGPoint(x: size.width, y: mascotBleed), anchor: .topTrailing)
     }
 }
