@@ -29,7 +29,7 @@ struct WidgetView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text(model.primary == .codex ? "CODEX USAGE" : "CLAUDE USAGE").font(.system(size: 12, weight: .semibold, design: .monospaced)).tracking(0.4).foregroundStyle(muted)
-                if model.demo { Text("DEMO").font(.system(size: 8, weight: .bold)).foregroundStyle(accent) }
+                if model.demo && !model.snapshot { Text("DEMO").font(.system(size: 8, weight: .bold)).foregroundStyle(accent) }
                 Spacer()
                 if model.primary != nil { hearts }
                 Button(action: hide) { Image(systemName: "xmark").foregroundStyle(muted).frame(width: 20, height: 20).contentShape(Rectangle()) }.help("Hide widget · reopen from the menu bar")
@@ -257,7 +257,6 @@ struct WidgetView: View {
 struct PreferencesView: View {
     @ObservedObject var model: AppModel
     @State private var loginError: String?
-    @State private var loginEnabled = SMAppService.mainApp.status == .enabled
 
     var body: some View {
         Form {
@@ -270,10 +269,10 @@ struct PreferencesView: View {
                     Text("1×").tag(1.0); Text("1.2×").tag(1.2); Text("1.5×").tag(1.5)
                 }.pickerStyle(.segmented)
                 CityField(model: model).disabled(!model.showSky)
-                Toggle("Launch at login", isOn: Binding(get: { loginEnabled }, set: { enabled in
+                Toggle("Launch at login", isOn: Binding(get: { model.launchAtLogin }, set: { enabled in
                     do {
                         if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-                        loginEnabled = SMAppService.mainApp.status == .enabled
+                        model.refreshLaunchAtLogin()
                         loginError = SMAppService.mainApp.status == .requiresApproval ? "Allow Clawd in System Settings → General → Login Items." : nil
                     } catch { loginError = error.localizedDescription }
                 })).disabled(model.demo)
@@ -294,18 +293,20 @@ struct PreferencesView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("About") {
-                Text("Clawd for Mac · 0.1.0")
+                Text("Clawd for Mac · \(AppVersion.current)")
                 Text("A native companion for Claude Code. Not affiliated with Anthropic. Based on clawd-usage-winwidget.").font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 16) {
                     Link("Original project", destination: URL(string: "https://github.com/Enhed/clawd-usage-winwidget")!)
-                    Link("Mac version", destination: URL(string: "https://github.com/mkozhukh/clawd-usage-macwidget")!)
+                    Link("Mac version", destination: URL(string: "https://github.com/mkozhukh/clawd-usage")!)
                 }
             }
         }
         .formStyle(.grouped)
-        // Tall enough for everything without scrolling; city matches or open
-        // coordinates scroll. A grouped Form has no natural height to size by.
-        .frame(width: 460, height: 850)
+        // Tall enough for everything without scrolling when the screen allows; the window is
+        // clamped to the screen and resizable, and the Form scrolls when it is shorter.
+        // A grouped Form has no natural height to size by, hence the explicit ideal.
+        .frame(width: 460)
+        .frame(minHeight: 360, idealHeight: 850)
     }
 
     /// A path field with a file picker; empty means detect automatically. Below it, where the

@@ -113,6 +113,49 @@ public enum CoreChecks {
             try check(CodexFamily.resolve(model: model) == family, "codex family \(model ?? "nil")")
         }
 
+        // Codex percent rounds down: 100 only when a window is really used up.
+        func codexPercent(_ used: Double) throws -> Int {
+            try CodexUsageParser.parse(Data(#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":\#(used),"windowDurationMins":300}}}}"#.utf8)).limits[0].limit.percent
+        }
+        try check(try codexPercent(99.5) == 99 && codexPercent(100) == 100 && codexPercent(130) == 100 && codexPercent(18.9) == 18, "codex percent rounds down")
+
+        // Claude session reset: reset moved later and usage dropped.
+        func claudeAt(_ percent: Int, _ reset: Double?) -> UsageSnapshot {
+            UsageSnapshot(session: .init(percent: percent, resetsAt: reset.map(Date.init(timeIntervalSince1970:))))
+        }
+        try check(claudeAt(3, 2000).didReset(from: claudeAt(80, 1000)), "claude session reset")
+        try check(!claudeAt(30, 1000).didReset(from: claudeAt(20, 1000)) && !claudeAt(90, 2000).didReset(from: claudeAt(80, 1000))
+                  && !claudeAt(3, 1000).didReset(from: claudeAt(80, 1000)) && !claudeAt(3, nil).didReset(from: claudeAt(80, 1000))
+                  && !claudeAt(3, 2000).didReset(from: claudeAt(80, nil)), "claude no reset")
+
+        // Coordinates: decimal comma, trimming, ranges.
+        try check(Coordinates.parse(lat: "52,52", lon: " 13,40 ").map { $0.lat == 52.52 && $0.lon == 13.4 } == true, "coordinates with decimal comma")
+        try check(Coordinates.parse(lat: "-90", lon: "180").map { $0.lat == -90 && $0.lon == 180 } == true, "coordinates at range ends")
+        try check(Coordinates.parse(lat: "91", lon: "10") == nil && Coordinates.parse(lat: "10", lon: "-180.5") == nil, "coordinates out of range")
+        try check(Coordinates.parse(lat: "", lon: "13") == nil && Coordinates.parse(lat: "  ", lon: " ") == nil && Coordinates.parse(lat: "abc", lon: "1") == nil
+                  && Coordinates.parse(lat: "1,2,3", lon: "1") == nil && Coordinates.parse(lat: "nan", lon: "1") == nil, "coordinates empty or unparsable")
+        try check(Coordinates.parse(lat: "52.52\n", lon: "\t13.4\r\n").map { $0.lat == 52.52 && $0.lon == 13.4 } == true, "coordinates pasted with a trailing newline")
+
+        // Executable lookup: directories and non-executables are skipped, symlinks to executables accepted.
+        let fm = FileManager.default
+        let temp = fm.temporaryDirectory.appendingPathComponent("clawd-checks-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: temp) }
+        let dirBin = temp.appendingPathComponent("a/codex"), realBin = temp.appendingPathComponent("b/codex")
+        let plain = temp.appendingPathComponent("c/codex"), link = temp.appendingPathComponent("d/codex")
+        for dir in ["a/codex", "b", "c", "d"] { try fm.createDirectory(at: temp.appendingPathComponent(dir), withIntermediateDirectories: true) }
+        fm.createFile(atPath: realBin.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        fm.createFile(atPath: plain.path, contents: Data("text".utf8), attributes: [.posixPermissions: 0o644])
+        try fm.createSymbolicLink(at: link, withDestinationURL: realBin)
+        try check(ExecutableLookup.first([dirBin.path, realBin.path])?.path == realBin.path, "executable lookup skips a directory")
+        try check(ExecutableLookup.first([link.path])?.path == link.path, "executable lookup accepts a symlink")
+        try check(ExecutableLookup.first([plain.path, dirBin.path]) == nil && ExecutableLookup.first([plain.path, link.path])?.path == link.path, "executable lookup skips non-executables")
+        try check(ExecutableLookup.first([temp.appendingPathComponent("missing").path]) == nil && ExecutableLookup.first([]) == nil, "executable lookup missing")
+
+        // Codex servers are never sessions.
+        try check(CodexProcessRule.isSession(arguments: []) && CodexProcessRule.isSession(arguments: ["exec", "fix it"])
+                  && CodexProcessRule.isSession(arguments: ["resume"]), "codex sessions")
+        try check(!CodexProcessRule.isSession(arguments: ["app-server"]) && !CodexProcessRule.isSession(arguments: ["mcp-server", "--x"]), "codex servers are not sessions")
+
         let busy = Session(pid: 1, cwd: "/tmp", status: "busy")
         let waiting = Session(pid: 2, cwd: "/tmp", status: "waiting")
         try check(Mood.resolve(percent: 100, sessions: [busy, waiting]) == .dead, "exhausted priority")

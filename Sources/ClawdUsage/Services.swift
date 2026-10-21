@@ -2,6 +2,11 @@ import Foundation
 import ClawdCore
 import Darwin
 
+/// The app's version from its Info.plist; "dev" when run unbundled (`swift run`).
+enum AppVersion {
+    static let current: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+}
+
 enum ServiceError: LocalizedError {
     case message(String)
     var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
@@ -24,7 +29,7 @@ private func findExecutable(_ name: String, custom: String, extra: [String] = []
         ? (["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"] + extra.map { "\(home)/\($0)" }
            + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)).map { "\($0)/\(name)" }
         : [(custom as NSString).expandingTildeInPath]
-    return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map(URL.init(fileURLWithPath:))
+    return ExecutableLookup.first(candidates)
 }
 
 /// The child's PATH starts with the executable's own folder, so an npm-installed script finds its node.
@@ -119,7 +124,7 @@ enum CodexCLI {
             let reply = ReplyBuffer()
             output.fileHandleForReading.readabilityHandler = { handle in
                 let chunk = handle.availableData
-                if chunk.isEmpty { handle.readabilityHandler = nil } else { reply.append(chunk) }
+                if chunk.isEmpty { handle.readabilityHandler = nil; reply.finish() } else { reply.append(chunk) }
             }
             try process.run()
             let pid = process.processIdentifier
@@ -133,7 +138,7 @@ enum CodexCLI {
                 ChildProcesses.shared.remove(pid)
             }
             let requests = [
-                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"clawd-mac","version":"0.1.0"}}}"#,
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"clawd-mac","version":"\#(AppVersion.current)"}}}"#,
                 #"{"jsonrpc":"2.0","method":"initialized"}"#,
                 #"{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}"#
             ]
@@ -142,6 +147,9 @@ enum CodexCLI {
             while Date() < deadline {
                 if let line = reply.line(id: 2) { return line }
                 if !process.isRunning {
+                    // The reply may still be in the pipe: wait for the reader to reach EOF, then look again.
+                    while !reply.ended && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+                    if let line = reply.line(id: 2) { return line }
                     throw ServiceError.message("Codex exited with code \(process.terminationStatus). Run codex login in Terminal.")
                 }
                 try await Task.sleep(for: .milliseconds(100))
@@ -154,7 +162,11 @@ enum CodexCLI {
     private final class ReplyBuffer: @unchecked Sendable {
         private let lock = NSLock()
         private var data = Data()
+        private var eof = false
         func append(_ chunk: Data) { lock.withLock { data.append(chunk) } }
+        /// The server closed its stdout; everything it wrote has been appended.
+        func finish() { lock.withLock { eof = true } }
+        var ended: Bool { lock.withLock { eof } }
         func line(id: Int) -> Data? {
             lock.withLock {
                 data.split(separator: UInt8(ascii: "\n")).first { line in
@@ -240,9 +252,11 @@ actor CodexActivityReader {
     }
 }
 
-/// Running Codex processes: the native `codex` binary (the npm wrapper is a separate `node`
+/// Running Codex sessions: the native `codex` binary (the npm wrapper is a separate `node`
 /// process), its working directory, and the session log it holds open. The widget's own
-/// app-server queries are left out.
+/// children (by parent PID and by `ChildProcesses`) and Codex servers (`app-server`,
+/// `mcp-server`) are left out. Each check fails open on its own: an unreadable parent PID
+/// skips only the parent check, unreadable arguments only the server check.
 enum CodexProcesses {
     struct Entry { var pid: Int32; var cwd: String; var rollout: URL? }
 
@@ -257,11 +271,43 @@ enum CodexProcesses {
         return pids.prefix(Int(filled)).compactMap { pid -> Entry? in
             guard pid > 0, !ChildProcesses.shared.contains(pid),
                   proc_pidpath(pid, &path, UInt32(path.count)) > 0,
-                  URL(fileURLWithPath: String(decoding: path.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)).lastPathComponent == "codex" else { return nil }
+                  URL(fileURLWithPath: String(decoding: path.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)).lastPathComponent == "codex",
+                  parent(of: pid) != getpid(),
+                  arguments(of: pid).map(CodexProcessRule.isSession(arguments:)) ?? true else { return nil }
             var info = proc_vnodepathinfo()
             guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, Int32(MemoryLayout<proc_vnodepathinfo>.size)) > 0 else { return nil }
             return Entry(pid: pid, cwd: text(info.pvi_cdir.vip_path), rollout: rollout(of: pid))
         }
+    }
+
+    /// nil when it cannot be read.
+    private static func parent(of pid: Int32) -> Int32? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return Int32(bitPattern: info.pbi_ppid)
+    }
+
+    /// argv[1...] from `KERN_PROCARGS2`: argc, the executable path, NUL padding, then argv.
+    /// nil when the data cannot be read or is truncated.
+    private static func arguments(of pid: Int32) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        let argc = Int(buffer.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) })
+        guard argc >= 1 else { return nil }
+        var index = MemoryLayout<Int32>.size
+        while index < size && buffer[index] != 0 { index += 1 }   // executable path
+        while index < size && buffer[index] == 0 { index += 1 }   // padding
+        var argv: [String] = []
+        while argv.count < argc {
+            guard index < size, let end = buffer[index..<size].firstIndex(of: 0) else { return nil }
+            argv.append(String(decoding: buffer[index..<end], as: UTF8.self))
+            index = end + 1
+        }
+        return Array(argv.dropFirst())
     }
 
     private static func rollout(of pid: Int32) -> URL? {

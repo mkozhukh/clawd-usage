@@ -1,6 +1,7 @@
 import AppKit
 import ClawdCore
 import SwiftUI
+import ServiceManagement
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -24,10 +25,15 @@ final class AppModel: ObservableObject {
     @Published var forcedMood: Mood?
     /// Developer mode for Astra: a held mood, and one animation to play next tick.
     @Published var forcedCodexMood: AstraMood?
+    /// Taking a snapshot for the README: the demo data without the DEMO badge.
+    var snapshot = false
     @Published var codexDevAct: String?
     @Published var forcedPhase: SkyPhase?
     @Published var forcedWeather: Int?
     @Published var hovering = false
+    /// The login item's state; re-read whenever Settings is shown, since System Settings can change it.
+    @Published private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
+    func refreshLaunchAtLogin() { launchAtLogin = SMAppService.mainApp.status == .enabled }
     var skyWidth = 0.0
     let weather = WeatherService()
     @Published var weatherLat: String { didSet { defaults.set(weatherLat, forKey: "weatherLat"); applyPlace() } }
@@ -62,6 +68,9 @@ final class AppModel: ObservableObject {
     private let codexStorage = CodexStorage()
     private let codexReader = CodexActivityReader()
     private var refreshingCodex = false
+    /// Loaded from disk at launch: shown, but not a baseline for reset celebrations. Cleared by
+    /// the first successful fetch; a failed fetch leaves it set.
+    private var restored = (usage: false, codex: false)
     private var polling = (claude: false, codex: false)
     private var tasks: [Task<Void, Never>] = []
 
@@ -137,8 +146,8 @@ final class AppModel: ObservableObject {
 
     /// Coordinates from the settings; empty means detect by IP.
     private func applyPlace() {
-        if let lat = Double(weatherLat.trimmingCharacters(in: .whitespaces)), let lon = Double(weatherLon.trimmingCharacters(in: .whitespaces)) {
-            weather.configured = WeatherPlace(lat: lat, lon: lon, city: weatherCity.isEmpty ? nil : weatherCity)
+        if let place = Coordinates.parse(lat: weatherLat, lon: weatherLon) {
+            weather.configured = WeatherPlace(lat: place.lat, lon: place.lon, city: weatherCity.isEmpty ? nil : weatherCity)
         } else { weather.configured = nil }
     }
 
@@ -168,23 +177,29 @@ final class AppModel: ObservableObject {
                                   week: .init(percent: 62, resetsAt: .now.addingTimeInterval(231000)),
                                   extraWeeks: ["Fable": .init(percent: 19)],
                                   statistics: "Last 24h · 128 requests · 8 sessions\n  23% of your usage was at >150k context\n  Top skills: /review 8%\n\nLast 7d · 814 requests · 32 sessions")
-            sessions = [.init(pid: 1, cwd: "/Projects/clawd-mac", status: "busy"),
+            sessions = [.init(pid: 1, cwd: "/Projects/clawd-usage", status: "busy"),
                         .init(pid: 2, cwd: "/Projects/website", status: "waiting", waitingFor: "permission")]
             if showCodex {
                 codex = CodexUsage(limits: [.init(title: "5H", limit: .init(percent: 24, resetsAt: .now.addingTimeInterval(7400))),
                                             .init(title: "WEEK", limit: .init(percent: 41, resetsAt: .now.addingTimeInterval(352000)))],
                                    plan: "plus")
                 codexActivity = CodexActivity(busy: 1, model: "gpt-6-astra", lastActive: .now,
-                                              sessions: [.init(pid: 3, cwd: "/Projects/api-server", status: "busy"), .init(pid: 4, cwd: "/Projects/clawd-mac", status: "idle")])
+                                              sessions: [.init(pid: 3, cwd: "/Projects/api-server", status: "busy"), .init(pid: 4, cwd: "/Projects/clawd-usage", status: "idle")])
             }
             weather.setDemo(WeatherReport(code: 2, temp: 14, wind: 12, sunrise: 430, sunset: 1110, at: .now),
                             place: WeatherPlace(lat: 52.5, lon: 13.4, city: "Demo"))
             onUsage?()
         } else {
             tasks.append(Task {
-                do { usage = try await storage.load(); onUsage?() }
-                catch { storageError = "Could not load last usage: \(error.localizedDescription)" }
-                if pollCodex { codex = try? await codexStorage.load() }
+                do {
+                    usage = try await storage.load()
+                    restored.usage = usage != nil
+                    onUsage?()
+                } catch { storageError = "Could not load last usage: \(error.localizedDescription)" }
+                if pollCodex {
+                    codex = try? await codexStorage.load()
+                    restored.codex = codex != nil
+                }
                 await refresh()
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(60))
@@ -251,8 +266,8 @@ final class AppModel: ObservableObject {
         do {
             let output = try await ClaudeCLI.run(arguments: ["-p", "/usage", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"], custom: cliPath)
             let next = try UsageParser.parse(output)
-            if let old = usage, let oldReset = old.session.resetsAt, let newReset = next.session.resetsAt,
-               newReset > oldReset, next.session.percent < old.session.percent { celebration = .now }
+            if !restored.usage, let old = usage, next.didReset(from: old) { celebration = .now }
+            restored.usage = false
             usage = next
             error = nil
             do { try await storage.save(next); storageError = nil }
@@ -267,7 +282,8 @@ final class AppModel: ObservableObject {
         do {
             let next = try CodexUsageParser.parse(try await CodexCLI.rateLimits(custom: codexPath))
             guard pollCodex else { return }
-            if let old = codex, next.didReset(from: old) { codexReset = .now }
+            if !restored.codex, let old = codex, next.didReset(from: old) { codexReset = .now }
+            restored.codex = false
             codex = next
             codexError = nil
             try? await codexStorage.save(next)

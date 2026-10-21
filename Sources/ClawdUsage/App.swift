@@ -6,6 +6,8 @@ import Combine
 @main
 struct ClawdMain {
     @MainActor static func main() {
+        // A Codex that closed its stdin must make the write throw, not kill the app.
+        signal(SIGPIPE, SIG_IGN)
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -33,7 +35,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         model = AppModel(demo: demo)
-        if demo { model.expanded = CommandLine.arguments.contains("--expanded") }
+        model.snapshot = snapshot
+        if demo { model.expanded = false }
+        if snapshot { model.minimal = CommandLine.arguments.contains("--minimal") }
         // Developer mode from the command line, e.g. for snapshots: --sky night --weather 95.
         func argument(_ name: String) -> String? {
             CommandLine.arguments.firstIndex(of: name).flatMap { $0 + 1 < CommandLine.arguments.count ? CommandLine.arguments[$0 + 1] : nil }
@@ -190,12 +194,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func screenChanged() { keepOnScreen() }
     @objc private func quit() { NSApp.terminate(nil) }
     @objc private func showPreferences() {
+        model.refreshLaunchAtLogin()
         if preferences == nil {
-            preferences = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 820), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            preferences?.title = "Clawd Settings"
-            preferences?.contentView = NSHostingView(rootView: PreferencesView(model: model))
-            preferences?.isReleasedWhenClosed = false
-            preferences?.center()
+            // At most the screen's visible height; the Form scrolls when the window is shorter.
+            let area = NSScreen.main?.visibleFrame.height ?? 850
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 850),
+                                  styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            window.title = "Clawd Settings"
+            let host = NSHostingView(rootView: PreferencesView(model: model))
+            // Only the minimum size comes from SwiftUI, so the window is not pinned to the Form's ideal height.
+            host.sizingOptions = [.minSize]
+            window.contentView = host
+            window.contentMinSize = NSSize(width: 460, height: 360)
+            window.contentMaxSize = NSSize(width: 460, height: CGFloat.greatestFiniteMagnitude)
+            window.isReleasedWhenClosed = false
+            let titleBar = window.frame.height - window.contentLayoutRect.height
+            window.setContentSize(NSSize(width: 460, height: max(360, min(850, area - titleBar))))
+            window.center()
+            preferences = window
+        }
+        if let window = preferences, let area = (window.screen ?? NSScreen.main)?.visibleFrame, window.frame.height > area.height {
+            var frame = window.frame
+            frame.size.height = area.height
+            frame.origin.y = area.minY
+            window.setFrame(frame, display: true)
         }
         NSApp.activate(ignoringOtherApps: true)
         preferences?.makeKeyAndOrderFront(nil)

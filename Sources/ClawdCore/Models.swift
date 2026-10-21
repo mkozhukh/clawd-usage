@@ -25,6 +25,14 @@ public struct UsageSnapshot: Codable, Sendable, Equatable {
     }
 }
 
+extension UsageSnapshot {
+    /// The session window started over since `old`: reset moved later and usage dropped.
+    public func didReset(from old: UsageSnapshot) -> Bool {
+        guard let oldReset = old.session.resetsAt, let newReset = session.resetsAt else { return false }
+        return newReset > oldReset && session.percent < old.session.percent
+    }
+}
+
 public struct Session: Codable, Sendable, Identifiable, Equatable {
     public var pid: Int32
     public var sessionId: String?
@@ -172,7 +180,7 @@ public enum CodexUsageParser {
             let prefix = index == 0 ? "" : (entry.limitName ?? entry.limitId ?? "other").uppercased() + " · "
             for window in [entry.primary, entry.secondary].compactMap({ $0 }) {
                 limits.append(CodexLimit(title: prefix + windowTitle(minutes: window.windowDurationMins),
-                                         limit: UsageLimit(percent: Int(window.usedPercent.rounded()),
+                                         limit: UsageLimit(percent: Int(min(100, max(0, window.usedPercent)).rounded(.down)),
                                                            resetsAt: window.resetsAt.map { Date(timeIntervalSince1970: $0) })))
             }
         }
@@ -313,5 +321,40 @@ public enum CodexFamily: String, CaseIterable, Sendable {
     public static func resolve(model: String?) -> CodexFamily {
         let words = (model ?? "").lowercased().split { !$0.isLetter && !$0.isNumber }
         return words.reversed().lazy.compactMap { CodexFamily(rawValue: String($0)) }.first ?? .astra
+    }
+}
+
+/// Weather coordinates typed in Settings.
+public enum Coordinates {
+    /// nil for empty, unparsable or out-of-range input. Spaces and newlines are trimmed and a decimal comma is accepted.
+    public static func parse(lat: String, lon: String) -> (lat: Double, lon: Double)? {
+        func number(_ text: String) -> Double? {
+            let clean = text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: ".")
+            guard !clean.isEmpty, let value = Double(clean), value.isFinite else { return nil }
+            return value
+        }
+        guard let la = number(lat), let lo = number(lon), (-90...90).contains(la), (-180...180).contains(lo) else { return nil }
+        return (la, lo)
+    }
+}
+
+public enum ExecutableLookup {
+    /// The first candidate that is an executable regular file (or a symlink to one); directories are skipped.
+    public static func first(_ candidates: [String]) -> URL? {
+        candidates.first { path in
+            var isDirectory: ObjCBool = false
+            // fileExists follows symlinks, so a link to a directory is skipped too.
+            return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && !isDirectory.boolValue
+                && FileManager.default.isExecutableFile(atPath: path)
+        }.map(URL.init(fileURLWithPath:))
+    }
+}
+
+public enum CodexProcessRule {
+    /// Whether a running `codex` process counts as a session: false when its first
+    /// argument (after the executable) is `app-server` or `mcp-server`.
+    public static func isSession(arguments: [String]) -> Bool {
+        guard let first = arguments.first else { return true }
+        return first != "app-server" && first != "mcp-server"
     }
 }

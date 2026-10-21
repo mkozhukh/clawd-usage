@@ -2,7 +2,7 @@ import Foundation
 import ClawdCore
 
 // Weather for the sky behind the mascot, as in the Windows widget: Open-Meteo
-// (no key), met.no when Open-Meteo does not answer, location from the settings
+// (no key), met.no for 8 hours after Open-Meteo does not answer, location from the settings
 // or once per run by IP via ipwho.is. Nothing here is required for usage data.
 
 struct WeatherReport: Sendable {
@@ -70,7 +70,9 @@ final class WeatherService: ObservableObject {
         didSet { if configured != oldValue { wxTry = .distantPast } }
     }
     static let interval: TimeInterval = 900
-    private var useMetNo = false
+    /// How long met.no answers after an Open-Meteo failure; a restart also tries Open-Meteo again.
+    static let fallbackCooldown: TimeInterval = 8 * 3600
+    private var openMeteoFailed = Date.distantPast
     private var geoTry = Date.distantPast
     private var wxTry = Date.distantPast
     private var fetching = false
@@ -106,14 +108,14 @@ final class WeatherService: ObservableObject {
         guard let place else { return }
         guard Date().timeIntervalSince(wxTry) >= Self.interval else { return }
         wxTry = .now
-        if useMetNo {
+        if Date().timeIntervalSince(openMeteoFailed) < Self.fallbackCooldown {
             if let r = await Self.fetchMetNo(place) { report = r }
             return
         }
         if let r = await Self.fetchOpenMeteo(place) { report = r }
         else {
-            // Open-Meteo is unreachable (sometimes blocked): ask met.no from now on.
-            useMetNo = true
+            // Open-Meteo is unreachable (sometimes blocked): ask met.no for a while.
+            openMeteoFailed = .now
             if let r = await Self.fetchMetNo(place) { report = r }
         }
     }
@@ -141,7 +143,7 @@ final class WeatherService: ObservableObject {
         guard let u = URL(string: url) else { return nil }
         var request = URLRequest(url: u)
         request.timeoutInterval = 15
-        request.setValue("clawd-mac (clawd-usage-winwidget port)", forHTTPHeaderField: "User-Agent")
+        request.setValue("clawd-mac/\(AppVersion.current) (+https://github.com/mkozhukh/clawd-usage)", forHTTPHeaderField: "User-Agent")
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]

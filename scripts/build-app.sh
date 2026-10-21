@@ -10,6 +10,7 @@ cp "$BIN_DIR/ClawdUsage" "$APP/Contents/MacOS/ClawdUsage"
 cp Info.plist "$APP/Contents/Info.plist"
 cp THIRD_PARTY_NOTICES "$APP/Contents/Resources/THIRD_PARTY_NOTICES"
 cp LICENSE "$APP/Contents/Resources/LICENSE"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 if [ -n "${CODE_SIGN_IDENTITY:-}" ]; then
     codesign --force --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$APP"
 else
@@ -19,5 +20,5 @@ printf 'Built %s\n' "$APP"
 printf 'Run: open "%s"\nDemo: open "%s" --args --demo\n' "$APP" "$APP"
 if [ "${1:-}" = "--snapshot" ]; then
     "$APP/Contents/MacOS/ClawdUsage" --demo --snapshot "$PWD/dist/demo.png"
-    "$APP/Contents/MacOS/ClawdUsage" --demo --expanded --snapshot "$PWD/dist/demo-expanded.png"
+    "$APP/Contents/MacOS/ClawdUsage" --demo --minimal --snapshot "$PWD/dist/demo-minimal.png"
 fi

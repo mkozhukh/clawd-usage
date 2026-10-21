@@ -3,9 +3,8 @@
 A macOS menu bar widget that shows your Claude Code and Codex usage limits, live sessions, and a pixel Clawd who reacts to them.
 
 <p>
-  <a href="docs/demo-expanded.png">
-    <img src="docs/demo.png" width="340" alt="Clawd widget: usage limits, the sky and Clawd">
-  </a>
+  <img src="docs/demo.png" width="340" align="top" alt="Clawd widget: usage limits, the sky and Clawd">
+  <img src="docs/demo-minimal.png" width="340" align="top" alt="Clawd widget in minimal mode: the current limit and Clawd">
 </p>
 
 ## Install
