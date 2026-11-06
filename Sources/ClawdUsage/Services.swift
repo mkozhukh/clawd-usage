@@ -40,6 +40,17 @@ private func childEnvironment(for executable: URL) -> [String: String] {
     return environment
 }
 
+/// Waits for the child to exit, up to `deadline`; false if it is still running then. Foundation can
+/// miss an exit (seen after the Mac slept mid-run): `isRunning` stays true and `waitUntilExit` blocks
+/// forever, so a pid that no longer exists counts as exited too.
+private func waitForExit(_ process: Process, pid: pid_t, until deadline: Date) async throws -> Bool {
+    while process.isRunning && kill(pid, 0) == 0 {
+        if Date() >= deadline { return false }
+        try await Task.sleep(for: .milliseconds(100))
+    }
+    return true
+}
+
 enum ClaudeCLI {
     static func executable(custom: String) throws -> URL {
         guard let url = findExecutable("claude", custom: custom) else {
@@ -74,18 +85,16 @@ enum ClaudeCLI {
             let pid = process.processIdentifier
             ChildProcesses.shared.insert(pid)
             defer { ChildProcesses.shared.remove(pid) }
-            let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
-            if process.isRunning {
+            if try await !waitForExit(process, pid: pid, until: Date().addingTimeInterval(timeout)) {
                 process.terminate()
-                let grace = Date().addingTimeInterval(1)
-                while process.isRunning && Date() < grace { try await Task.sleep(for: .milliseconds(50)) }
-                if process.isRunning { kill(pid, SIGKILL) }
-                process.waitUntilExit()
+                if try await !waitForExit(process, pid: pid, until: Date().addingTimeInterval(1)) {
+                    kill(pid, SIGKILL)
+                    _ = try await waitForExit(process, pid: pid, until: Date().addingTimeInterval(2))
+                }
                 throw ServiceError.message("Claude timed out after \(Int(timeout)) seconds. Last known usage is retained.")
             }
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
+            // terminationStatus raises while Foundation still thinks the child runs; the output then decides.
+            guard process.isRunning || process.terminationStatus == 0 else {
                 let detail = (try? String(contentsOf: error, encoding: .utf8)) ?? ""
                 throw ServiceError.message(detail.isEmpty ? "Claude exited with code \(process.terminationStatus). Run claude auth login in Terminal." : String(detail.prefix(600)))
             }

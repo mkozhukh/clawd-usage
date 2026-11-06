@@ -114,10 +114,10 @@ final class AppModel: ObservableObject {
     enum Harness { case claude, codex }
     /// Whose numbers lead the widget: Claude when shown, else Codex; nil when neither is shown.
     var primary: Harness? { showClaude ? .claude : showCodex ? .codex : nil }
-    /// The big percentage and the hearts: Claude's session, or Codex's first window.
+    /// The big percentage and the hearts: Claude's session (its week on weekly-only plans), or Codex's first window.
     var mainLimit: UsageLimit? {
         switch primary {
-        case .claude: usage?.session
+        case .claude: usage?.main
         case .codex: codex?.limits.first?.limit
         case nil: nil
         }
@@ -165,7 +165,7 @@ final class AppModel: ObservableObject {
         return weather.tip(force: force.isEmpty ? nil : force.joined(separator: ", "))
     }
 
-    var mood: Mood { forcedMood ?? Mood.resolve(percent: usage?.session.percent, sessions: sessions) }
+    var mood: Mood { forcedMood ?? Mood.resolve(percent: usage?.main?.percent, sessions: sessions) }
     var stale: Bool { mainFetchedAt.map { now.timeIntervalSince($0) > 150 } ?? true }
     var codexFamily: CodexFamily { .resolve(model: codexActivity.model) }
     var busyCount: Int { sessions.filter { $0.status == "busy" }.count }

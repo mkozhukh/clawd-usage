@@ -1,0 +1,19 @@
+# https://taskfile.dev
+
+version: '3'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build dist/Clawd.app (ad-hoc signed unless CODE_SIGN_IDENTITY is set); `task build -- --snapshot` also renders demo PNGs
+    cmds:
+      - scripts/build-app.sh {{.CLI_ARGS}}
+
+  publish:
+    desc: Build, sign, notarize and staple, then tag v<version> and create the GitHub release
+    cmds:
+      - scripts/release.sh --publish

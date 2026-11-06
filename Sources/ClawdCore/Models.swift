@@ -10,12 +10,13 @@ public struct UsageLimit: Codable, Sendable, Equatable {
 }
 
 public struct UsageSnapshot: Codable, Sendable, Equatable {
-    public var session: UsageLimit
+    /// The five-hour window; nil on plans that have only weekly limits.
+    public var session: UsageLimit?
     public var week: UsageLimit?
     public var extraWeeks: [String: UsageLimit]
     public var statistics: String
     public var fetchedAt: Date
-    public init(session: UsageLimit, week: UsageLimit? = nil,
+    public init(session: UsageLimit?, week: UsageLimit? = nil,
                 extraWeeks: [String: UsageLimit] = [:], statistics: String = "", fetchedAt: Date = .now) {
         self.session = session
         self.week = week
@@ -26,10 +27,18 @@ public struct UsageSnapshot: Codable, Sendable, Equatable {
 }
 
 extension UsageSnapshot {
-    /// The session window started over since `old`: reset moved later and usage dropped.
+    /// Plans without a five-hour window lead with the weekly (all models) limit.
+    public var isWeekly: Bool { session == nil }
+
+    /// The limit that leads: the session window, else the weekly one.
+    public var main: UsageLimit? { session ?? week }
+
+    /// The leading window started over since `old`: reset moved later and usage dropped.
+    /// A switch between session and weekly mode does not count.
     public func didReset(from old: UsageSnapshot) -> Bool {
-        guard let oldReset = old.session.resetsAt, let newReset = session.resetsAt else { return false }
-        return newReset > oldReset && session.percent < old.session.percent
+        guard isWeekly == old.isWeekly, let now = main, let before = old.main,
+              let oldReset = before.resetsAt, let newReset = now.resetsAt else { return false }
+        return newReset > oldReset && now.percent < before.percent
     }
 }
 
@@ -82,7 +91,8 @@ public enum UsageParser {
             else if match[2] == "all models" { week = limit }
             else { extras[match[2]] = limit }
         }
-        guard let session else { throw ParseError.missingSession }
+        // Some plans report only weekly limits; either the session or the all-models week must be there.
+        guard session != nil || week != nil else { throw ParseError.missingSession }
         let stats = clean.range(of: "What's contributing").map { String(clean[$0.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
         return UsageSnapshot(session: session, week: week, extraWeeks: extras, statistics: stats, fetchedAt: now)
     }

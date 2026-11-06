@@ -159,7 +159,8 @@ final class AstraEngine: ObservableObject {
                 f.points = "short"; f.eyes = "closed"; s.bright = 0.55; s.glow = 0.6
                 if animate {
                     let p = t.truncatingRemainder(dividingBy: 3) / 3
-                    s.z = (x + astraW - 2 + 3 * sin(p * 2 * .pi), bottom + astraH - 4 + 12 * p, 7 + 3 * p, 1 - p)
+                    // Whole point sizes: each new size is a new font for the text system, every frame.
+                    s.z = (x + astraW - 2 + 3 * sin(p * 2 * .pi), bottom + astraH - 4 + 12 * p, (7 + 3 * p).rounded(), 1 - p)
                 }
             } else if mood == .low {
                 f.eyes = blink ? "closed" : "down"

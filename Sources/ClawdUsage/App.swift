@@ -97,7 +97,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) { model?.stop() }
     func windowDidChangeOcclusionState(_ notification: Notification) {
+        guard notification.object as? NSWindow === panel else { return }
         model.visible = panel.isVisible && panel.occlusionState.contains(.visible)
+    }
+    /// A closed Settings window is let go: its view would otherwise keep observing the model
+    /// and re-render the whole Form every second, unseen.
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === preferences else { return }
+        window.contentView = nil
+        preferences = nil
     }
 
     private func applyWindowPreferences() {
@@ -132,10 +140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         claudeItem.isVisible = model.claudeInMenuBar || !model.codexInMenuBar
         codexItem.isVisible = model.codexInMenuBar
         if model.claudeInMenuBar {
-            let percent = model.usage?.session.percent
+            let usage = model.usage
+            let percent = usage?.main?.percent
             claudeItem.button?.title = " " + (percent.map { "\($0)%" } ?? "—") + (model.error != nil ? " !" : "")
-            claudeItem.button?.toolTip = "Claude · " + (percent.map { "Session \($0)%" } ?? "Waiting for usage")
-                + (model.usage?.week.map { " · Week \($0.percent)%" } ?? "")
+            let lead = usage?.session.map { "Session \($0.percent)%" + (usage?.week.map { " · Week \($0.percent)%" } ?? "") }
+                ?? usage?.week.map { "Week \($0.percent)%" }
+            claudeItem.button?.toolTip = "Claude · " + (lead ?? "Waiting for usage")
         } else {
             claudeItem.button?.title = ""
             claudeItem.button?.toolTip = "Clawd"
@@ -208,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.contentMinSize = NSSize(width: 460, height: 360)
             window.contentMaxSize = NSSize(width: 460, height: CGFloat.greatestFiniteMagnitude)
             window.isReleasedWhenClosed = false
+            window.delegate = self
             let titleBar = window.frame.height - window.contentLayoutRect.height
             window.setContentSize(NSSize(width: 460, height: max(360, min(850, area - titleBar))))
             window.center()

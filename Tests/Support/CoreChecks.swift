@@ -23,23 +23,31 @@ public enum CoreChecks {
           New future metric: 12%
         """
         let report = try UsageParser.parse(output, now: date("2026-10-17T00:00:00Z"), timeZone: utc)
-        try check(report.session.percent == 10, "session percentage")
-        try check(report.session.resetsAt == date("2026-10-17T02:19:00Z"), "explicit timezone")
+        try check(report.session?.percent == 10, "session percentage")
+        try check(report.session?.resetsAt == date("2026-10-17T02:19:00Z"), "explicit timezone")
         try check(report.week?.resetsAt == date("2026-10-19T03:00:00Z"), "optional minutes")
         try check(report.extraWeeks["Fable"]?.percent == 19, "optional Fable window")
         try check(report.extraWeeks["New model"]?.percent == 7, "unknown model window")
         try check(report.statistics.contains("New future metric"), "preserve unknown metrics")
         let empty = try UsageParser.parse("Current session: 0% used")
-        try check(empty.session.percent == 0 && empty.session.resetsAt == nil, "zero without reset")
+        try check(empty.session?.percent == 0 && empty.session?.resetsAt == nil, "zero without reset")
         try check(empty.week == nil && empty.extraWeeks.isEmpty, "missing optional windows")
         let now = date("2026-12-31T20:00:00Z")
         try check(UsageParser.parseReset("Jan 1, 12am", now: now, timeZone: utc) == date("2027-01-01T00:00:00Z"), "year rollover at midnight")
         try check(UsageParser.parseReset("Jan 1, 12pm", now: now, timeZone: utc) == date("2027-01-01T12:00:00Z"), "noon parsing")
         try check(UsageParser.parseReset("not a date", now: now, timeZone: utc) == nil, "malformed reset")
         try check(UsageParser.parseReset("Oct 17 at 7:09pm (Europe/Warsaw)", now: date("2026-10-17T00:00:00Z"), timeZone: utc) == date("2026-10-17T17:09:00Z"), "newer 'at' reset format")
-        try check(try UsageParser.parse("Current session: 11% used · resets Oct 17 at 7:09pm (Europe/Warsaw)", now: date("2026-10-17T00:00:00Z"), timeZone: utc).session.resetsAt != nil, "session line with 'at'")
-        try check(try UsageParser.parse("\u{001B}[32mCurrent session: 85% used\u{001B}[0m").session.percent == 85, "ANSI removal")
-        for invalid in ["Please log in", "Current week (all models): 20% used", ""] {
+        try check(try UsageParser.parse("Current session: 11% used · resets Oct 17 at 7:09pm (Europe/Warsaw)", now: date("2026-10-17T00:00:00Z"), timeZone: utc).session?.resetsAt != nil, "session line with 'at'")
+        try check(try UsageParser.parse("\u{001B}[32mCurrent session: 85% used\u{001B}[0m").session?.percent == 85, "ANSI removal")
+        // Weekly-only plans: no session line, the all-models week leads.
+        let weekly = try UsageParser.parse("""
+        Current week (all models): 20% used · resets Nov 8 at 3:59am (Europe/Warsaw)
+        Current week (Fable): 4% used · resets Nov 8 at 4am (Europe/Warsaw)
+        """, now: date("2026-11-06T00:00:00Z"), timeZone: utc)
+        try check(weekly.session == nil && weekly.isWeekly && weekly.main?.percent == 20, "weekly-only plan leads with week")
+        try check(weekly.main?.resetsAt == date("2026-11-08T02:59:00Z") && weekly.extraWeeks["Fable"]?.percent == 4, "weekly-only windows")
+        try check(!report.isWeekly && report.main?.percent == 10, "session plan leads with session")
+        for invalid in ["Please log in", "Current week (Fable): 20% used", ""] {
             do {
                 _ = try UsageParser.parse(invalid)
                 throw Failure(description: "Accepted invalid usage output")
@@ -127,6 +135,11 @@ public enum CoreChecks {
         try check(!claudeAt(30, 1000).didReset(from: claudeAt(20, 1000)) && !claudeAt(90, 2000).didReset(from: claudeAt(80, 1000))
                   && !claudeAt(3, 1000).didReset(from: claudeAt(80, 1000)) && !claudeAt(3, nil).didReset(from: claudeAt(80, 1000))
                   && !claudeAt(3, 2000).didReset(from: claudeAt(80, nil)), "claude no reset")
+        func weeklyAt(_ percent: Int, _ reset: Double) -> UsageSnapshot {
+            UsageSnapshot(session: nil, week: .init(percent: percent, resetsAt: Date(timeIntervalSince1970: reset)))
+        }
+        try check(weeklyAt(1, 9000).didReset(from: weeklyAt(70, 1000)), "claude weekly reset")
+        try check(!weeklyAt(1, 9000).didReset(from: claudeAt(70, 1000)) && !claudeAt(1, 9000).didReset(from: weeklyAt(70, 1000)), "plan switch is no reset")
 
         // Coordinates: decimal comma, trimming, ranges.
         try check(Coordinates.parse(lat: "52,52", lon: " 13,40 ").map { $0.lat == 52.52 && $0.lon == 13.4 } == true, "coordinates with decimal comma")

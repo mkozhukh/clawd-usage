@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import ClawdCore
 
@@ -178,56 +179,87 @@ final class SkyEngine: ObservableObject {
     }
 }
 
-struct SkyView: View {
+/// Drawn by an AppKit view with Core Graphics, not a SwiftUI Canvas: a Canvas redrawn every
+/// mascot frame next to the mascot Canvas makes SwiftUI's renderer leak a dispatch timer every
+/// few frames, and after a few days the thousands of them slow the whole app down.
+struct SkyView: NSViewRepresentable {
     @ObservedObject var engine: SkyEngine
 
-    var body: some View {
-        Canvas { context, size in
-            let s = engine.scene
-            let w = size.width, h = size.height
-            // The sky fades out at both edges.
-            context.clipToLayer { mask in
-                mask.fill(Path(CGRect(origin: .zero, size: size)), with: .linearGradient(
-                    Gradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.1),
-                                     .init(color: .black, location: 0.9), .init(color: .clear, location: 1)]),
-                    startPoint: .zero, endPoint: CGPoint(x: w, y: 0)))
-            }
-            context.fill(Path(CGRect(origin: .zero, size: size)), with: .linearGradient(
-                Gradient(colors: [color(s.top), color(s.bottom)]), startPoint: .zero, endPoint: CGPoint(x: 0, y: h)))
-            context.opacity = 0.7
-            for st in s.stars { context.fill(Path(CGRect(x: st.x, y: st.y, width: 1.2, height: 1.2)), with: .color(color(RGBA("#FFF8FAFC").opacity(st.opacity)))) }
-            if let glow = s.glow {
-                context.fill(Path(ellipseIn: CGRect(x: glow.x, y: glow.y, width: 20, height: 20)), with: .radialGradient(
-                    Gradient(colors: [color(RGBA("#40FDE68A").opacity(glow.opacity)), color(RGBA("#00FDE68A"))]),
-                    center: CGPoint(x: glow.x + 10, y: glow.y + 10), startRadius: 0, endRadius: 10))
-            }
-            if let sun = s.sun { pixels(&context, Self.sunBody, at: sun, px: 1.4, color: s.sunColor.opacity(sun.opacity)) }
-            if let moon = s.moon {
-                pixels(&context, s.moonDark, at: moon, px: 1.3, color: RGBA("#2EE5E7EB").opacity(moon.opacity))
-                pixels(&context, s.moonLit, at: moon, px: 1.3, color: RGBA("#FFF1F5F9").opacity(moon.opacity))
-            }
-            for c in s.clouds { pixels(&context, SkyEngine.cloudShapes[c.shape], at: .init(x: c.x, y: c.y, opacity: 1), px: 2, color: s.cloudColor.opacity(c.opacity)) }
-            for f in s.fog {
-                let band = Color(red: 0.898, green: 0.906, blue: 0.922)
-                context.fill(Path(CGRect(x: f.x, y: f.y, width: f.w, height: 3)), with: .linearGradient(
-                    Gradient(colors: [band.opacity(0), band.opacity(f.opacity), band.opacity(0)]),
-                    startPoint: CGPoint(x: f.x, y: 0), endPoint: CGPoint(x: f.x + f.w, y: 0)))
-            }
-            for d in s.drops { context.fill(Path(CGRect(x: d.x, y: d.y, width: 1, height: 3.5)), with: .color(color(RGBA("#8093C5FD")))) }
-            for f in s.flakes { context.fill(Path(CGRect(x: f.x, y: f.y, width: 1.6, height: 1.6)), with: .color(color(RGBA("#C0E4E4E7")))) }
-            if let ground = s.ground { context.fill(Path(CGRect(x: 0, y: h - 1.5, width: w, height: 1.5)), with: .color(color(ground))) }
-            if s.flash > 0 { context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(color(RGBA("#FFF8FAFC").opacity(s.flash)))) }
+    func makeNSView(context: Context) -> SkyLayerView { SkyLayerView() }
+    func updateNSView(_ view: SkyLayerView, context: Context) { view.scene = engine.scene }
+
+    final class SkyLayerView: NSView {
+        var scene = SkyScene() { didSet { needsDisplay = true } }
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            layerContentsRedrawPolicy = .onSetNeedsDisplay
+            setAccessibilityElement(false)
         }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
+        required init?(coder: NSCoder) { fatalError("not used") }
 
-    private static let sunBody = SkyEngine.sunBody
+        override var isFlipped: Bool { true }
+        override var isOpaque: Bool { false }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    private func pixels(_ context: inout GraphicsContext, _ rects: [PixelRect], at body: SkyScene.Body, px: Double, color c: RGBA) {
-        var path = Path()
-        for r in rects { path.addRect(CGRect(x: body.x + r.x * px, y: body.y + r.y * px, width: r.w * px, height: r.h * px)) }
-        context.fill(path, with: .color(color(c)))
+        override func draw(_ dirtyRect: NSRect) {
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+            let s = scene
+            let w = bounds.width, h = bounds.height
+            let all = CGRect(x: 0, y: 0, width: w, height: h)
+            // Drawn in a layer, then faded out at both edges.
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+            linear(ctx, all, [cg(s.top), cg(s.bottom)], from: .zero, to: CGPoint(x: 0, y: h))
+            ctx.saveGState()
+            ctx.setAlpha(0.7)
+            for st in s.stars { fill(ctx, CGRect(x: st.x, y: st.y, width: 1.2, height: 1.2), RGBA("#FFF8FAFC").opacity(st.opacity)) }
+            if let glow = s.glow {
+                ctx.saveGState()
+                ctx.addEllipse(in: CGRect(x: glow.x, y: glow.y, width: 20, height: 20)); ctx.clip()
+                let c = CGPoint(x: glow.x + 10, y: glow.y + 10)
+                if let g = gradient([cg(RGBA("#40FDE68A").opacity(glow.opacity)), cg(RGBA("#00FDE68A"))]) {
+                    ctx.drawRadialGradient(g, startCenter: c, startRadius: 0, endCenter: c, endRadius: 10, options: [])
+                }
+                ctx.restoreGState()
+            }
+            if let sun = s.sun { pixels(ctx, SkyEngine.sunBody, at: sun, px: 1.4, s.sunColor.opacity(sun.opacity)) }
+            if let moon = s.moon {
+                pixels(ctx, s.moonDark, at: moon, px: 1.3, RGBA("#2EE5E7EB").opacity(moon.opacity))
+                pixels(ctx, s.moonLit, at: moon, px: 1.3, RGBA("#FFF1F5F9").opacity(moon.opacity))
+            }
+            for c in s.clouds { pixels(ctx, SkyEngine.cloudShapes[c.shape], at: .init(x: c.x, y: c.y, opacity: 1), px: 2, s.cloudColor.opacity(c.opacity)) }
+            for f in s.fog {
+                let band = RGBA(r: 0.898, g: 0.906, b: 0.922)
+                linear(ctx, CGRect(x: f.x, y: f.y, width: f.w, height: 3), [cg(band.opacity(0)), cg(band.opacity(f.opacity)), cg(band.opacity(0))],
+                       from: CGPoint(x: f.x, y: 0), to: CGPoint(x: f.x + f.w, y: 0))
+            }
+            for d in s.drops { fill(ctx, CGRect(x: d.x, y: d.y, width: 1, height: 3.5), RGBA("#8093C5FD")) }
+            for f in s.flakes { fill(ctx, CGRect(x: f.x, y: f.y, width: 1.6, height: 1.6), RGBA("#C0E4E4E7")) }
+            if let ground = s.ground { fill(ctx, CGRect(x: 0, y: h - 1.5, width: w, height: 1.5), ground) }
+            if s.flash > 0 { fill(ctx, all, RGBA("#FFF8FAFC").opacity(s.flash)) }
+            ctx.restoreGState()
+            ctx.setBlendMode(.destinationIn)
+            let black = CGColor(gray: 0, alpha: 1), clear = CGColor(gray: 0, alpha: 0)
+            if let mask = CGGradient(colorsSpace: nil, colors: [clear, black, black, clear] as CFArray, locations: [0, 0.1, 0.9, 1]) {
+                ctx.drawLinearGradient(mask, start: .zero, end: CGPoint(x: w, y: 0), options: [])
+            }
+            ctx.endTransparencyLayer()
+        }
+
+        private func cg(_ c: RGBA) -> CGColor { CGColor(srgbRed: c.r, green: c.g, blue: c.b, alpha: c.a) }
+        private func gradient(_ colors: [CGColor]) -> CGGradient? { CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: colors as CFArray, locations: nil) }
+        private func fill(_ ctx: CGContext, _ rect: CGRect, _ c: RGBA) { ctx.setFillColor(cg(c)); ctx.fill(rect) }
+        private func linear(_ ctx: CGContext, _ rect: CGRect, _ colors: [CGColor], from: CGPoint, to: CGPoint) {
+            guard let g = gradient(colors) else { return }
+            ctx.saveGState(); ctx.clip(to: rect)
+            ctx.drawLinearGradient(g, start: from, end: to, options: [])
+            ctx.restoreGState()
+        }
+        private func pixels(_ ctx: CGContext, _ rects: [PixelRect], at body: SkyScene.Body, px: Double, _ c: RGBA) {
+            ctx.setFillColor(cg(c))
+            ctx.fill(rects.map { CGRect(x: body.x + $0.x * px, y: body.y + $0.y * px, width: $0.w * px, height: $0.h * px) })
+        }
     }
 }
 

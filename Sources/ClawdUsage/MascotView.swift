@@ -312,7 +312,7 @@ final class MascotEngine: ObservableObject {
         if zzz {
             let p = Double(tick % 30) / 30
             let zb: Double = f.dig > 0 ? 9 : f.off > 0 ? 12 : 19
-            s.z = (x + 28 + 3 * sin(p * 2 * .pi), zb + 14 * p, 7 + 4 * p, 1 - p)
+            s.z = (x + 28 + 3 * sin(p * 2 * .pi), zb + 14 * p, (7 + 4 * p).rounded(), 1 - p)   // whole sizes, as for Astra
         }
         // Bubble over the head: "?" a session awaits a reply, "!" celebration.
         if !bubble.isEmpty {
@@ -448,7 +448,7 @@ struct MascotView: View {
             if model.showClaude {
                 engine.mood = model.mood
                 engine.forced = model.forcedMood
-                engine.percent = model.usage?.session.percent
+                engine.percent = model.usage?.main?.percent
                 engine.hovering = model.hovering
                 engine.notice(finished: model.sessionFinished, celebration: model.celebration)
                 if reduceMotion { engine.still() } else { engine.step() }

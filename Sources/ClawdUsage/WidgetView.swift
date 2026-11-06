@@ -69,7 +69,10 @@ struct WidgetView: View {
                             Text(mainResetText).font(.system(size: 11)).foregroundStyle(resetColor).padding(.top, 7)
                         }
                         if model.showClaude && !model.minimal {
-                            if let week = model.usage?.week { limitRow("WEEK", week, color: barWeek).padding(.top, 9) }
+                            // On weekly-only plans the week is already the big number.
+                            if let week = model.usage?.week, model.usage?.isWeekly == false {
+                                limitRow("WEEK", week, color: barWeek).padding(.top, 9)
+                            }
                             ForEach((model.usage?.extraWeeks ?? [:]).keys.sorted(), id: \.self) { key in
                                 if let value = model.usage?.extraWeeks[key] { limitRow("\(key.uppercased()) · WEEK", value, color: barModel).padding(.top, 7) }
                             }
@@ -240,11 +243,16 @@ struct WidgetView: View {
             bar(value.percent, color: color, height: 4)
         }
     }
-    /// Under the big number. Codex names its window, since it may be the five-hour or the weekly one.
+    /// Under the big number. Codex names its window, since it may be the five-hour or the weekly one;
+    /// Claude names it only on weekly-only plans.
     private var mainResetText: String {
         let failed = model.primary == .claude ? model.error != nil : model.codexError != nil
         guard let limit = model.mainLimit else { return failed ? "no data" : "loading..." }
-        let window = model.primary == .codex ? model.codex?.limits.first.map { "\($0.title.lowercased()) · " } ?? "" : ""
+        let window = switch model.primary {
+        case .codex: model.codex?.limits.first.map { "\($0.title.lowercased()) · " } ?? ""
+        case .claude: model.usage?.isWeekly == true ? "week · " : ""
+        case nil: ""
+        }
         guard let resetsAt = limit.resetsAt else { return window.isEmpty ? "" : String(window.dropLast(3)) }
         return window + (spanText(until: resetsAt, now: model.now).map { "resets in \($0)" } ?? "window closed")
     }
